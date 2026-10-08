@@ -1,0 +1,5 @@
+/plasticity
+*.db
+*.db-wal
+*.db-shm
+.explain/
