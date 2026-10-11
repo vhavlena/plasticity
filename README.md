@@ -87,6 +87,16 @@ kept only for informational timestamps (`created_at`, `updated_at`).
    activation less far. Candidates below `min_seed_strength` are dropped, so a
    query with no good match returns nothing. Queries about several topics are
    not penalized, because `C` measures what the candidates match together.
+
+   **Semantic seeds (optional).** With embeddings enabled, the query is also
+   embedded and compared against every node's vector by cosine similarity.
+   Similarity is calibrated to a strength `S = clamp((cos − 0.25)/(0.6 − 0.25))`
+   (`vector_cos_low`, `vector_cos_high`). The lexical strength `L` and `S` are
+   fused by noisy-OR: `seed = 1 − (1 − L)(1 − S)`. Either signal alone can
+   seed a node, and agreement makes a seed stronger. The learning gate uses
+   `max(C, best S)`. A paraphrase with no shared words, such as "how do
+   memories get stronger" finding "Hebbian learning", can therefore still
+   seed recall.
 2. **Spreading.** Activation flows outward from each seed. Crossing an edge of
    weight `w` from a node with degree `k` multiplies the activation by
    `δ·w / max(1, k/K₀)^β`. A node is reached only while its activation stays
@@ -130,9 +140,82 @@ plasticity reinforce ID ID ID             # these neurons were used together
 plasticity feedback -s SESSION -u ID,ID   # LTP for used neurons, LTD for unused ones
 plasticity consolidate                    # pruning, homeostasis, dormancy
 plasticity stats | export -f dot | params
+plasticity embed enable hugot             # download all-MiniLM-L6-v2, index all neurons
+plasticity embed enable ollama --model nomic-embed-text
+plasticity embed status | reindex [--all] | disable | prune
+plasticity --no-embed recall "query"      # lexical-only baseline on the same graph
 ```
 
 Global flags: `--db`, `--pretty`.
+
+## Embeddings
+
+Embeddings are optional, free and local. Without them, recall is purely
+lexical. The embedder configuration is stored in the database, because all
+vectors in a graph must come from the same model.
+
+| backend | how it runs | default model | cost |
+|---|---|---|---|
+| `hugot` | in-process, pure Go (no cgo, no server) | `sentence-transformers/all-MiniLM-L6-v2`, 384 dims, ~90 MB, downloaded next to the database | ~80 ms per CLI call to load the model, ~15 ms per further text; ~390 MB peak memory |
+| `ollama` | HTTP to a local Ollama server | `nomic-embed-text`, with its `search_query:` / `search_document:` prefixes | depends on the server |
+
+- **Indexing.** Nodes are embedded when they are added or updated. Text is
+  truncated to `embed_max_words` (200) words, because inference cost grows
+  quadratically with length.
+- **Failures don't block.** If the embedder is unavailable, the node is
+  stored without a vector, recall falls back to BM25, and a warning goes to
+  stderr. `embed reindex` fills in missing vectors later.
+- **Search.** Vectors are searched by brute force. This takes a few
+  milliseconds per thousand nodes; an approximate index such as HNSW is a
+  later option.
+- **Several embedders side by side.** Vectors are stored per embedder ID.
+  `embed enable` with a different model indexes alongside the existing
+  vectors, and switching back to an earlier embedder re-embeds nothing.
+  `embed disable` stops using embeddings but keeps the vectors, and
+  `embed prune` deletes every embedder's vectors except the active one's.
+- **Known library issues.** hugot v0.8.2's Go backend crashes on batches whose
+  size isn't one of its internal buckets, so texts are embedded one at a
+  time. Its matmul code also trips Go's checkptr checks under `-race`, so
+  the real-model tests skip themselves there. To run those tests, set
+  `PLASTICITY_TEST_MODEL` to a downloaded model directory.
+
+### Plugging in an embedder
+
+Any type that implements `embed.Embedder` can be used:
+
+```go
+type Embedder interface {
+	ID() string // vectors are stored per ID; never mixed across IDs
+	Embed(ctx context.Context, text string, kind embed.Kind) ([]float32, error) // L2-normalized
+	Close() error
+}
+```
+
+There are two ways to plug one in:
+
+- **Programmatically**, for experiments and tests. Pass it straight to the
+  engine with `engine.Open(path, engine.WithEmbedder(myEmb))`. This overrides
+  the stored configuration, and the caller keeps ownership of the embedder.
+  `engine.WithoutEmbeddings()` gives a lexical-only engine on the same
+  database, which makes A/B comparisons easy.
+- **By name**, so the embedder can be selected from configuration and the
+  CLI. Register a provider:
+
+  ```go
+  embed.Register("mymodel", embed.Provider{
+      Factory: func(ctx context.Context, c embed.Config) (embed.Embedder, error) {
+          return newMyEmbedder(c.Model, c.Options["dim"])
+      },
+      // Optional: fill in default config values, or set up once on enable
+      // (e.g. download a model into modelsDir).
+      Defaults: func(c embed.Config) embed.Config { return c },
+      Prepare:  func(ctx context.Context, c embed.Config, modelsDir string) (embed.Config, error) { return c, nil },
+  })
+  ```
+
+  After that, `plasticity embed enable mymodel --model X --opt dim=256`
+  works. The built-in `hugot` and `ollama` providers register themselves the
+  same way, in `internal/embed/hugot.go` and `internal/embed/ollama.go`.
 
 ## Layout
 
@@ -142,5 +225,6 @@ internal/model       Node, Edge, Params
 internal/store       SQLite schema, transactions, FTS5 search
 internal/plasticity  pure synaptic dynamics
 internal/retrieval   spreading activation, personalized PageRank
+internal/embed       embedders: hugot (in-process ONNX), Ollama
 internal/engine      orchestration: recall, learning, consolidation, export
 ```

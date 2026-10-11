@@ -75,6 +75,13 @@ type Params struct {
 	// the graph when computing query confidence (0 = ignore unknown words,
 	// 1 = treat them as fully unexplained query content).
 	AbsentTermWeight float64 `json:"absent_term_weight"`
+	// VectorCosLow and VectorCosHigh calibrate embedding similarity into a
+	// semantic seed strength S = clamp((cos − low)/(high − low), 0, 1):
+	// cosine at or below low is no evidence, at or above high is certain.
+	VectorCosLow  float64 `json:"vector_cos_low"`
+	VectorCosHigh float64 `json:"vector_cos_high"`
+	// EmbedMaxWords truncates texts before embedding.
+	EmbedMaxWords int `json:"embed_max_words"`
 	// MinSeedStrength drops seeds whose strength (relative BM25 × query
 	// confidence) is below it; a query without a good match recalls nothing.
 	MinSeedStrength float64 `json:"min_seed_strength"`
@@ -142,6 +149,9 @@ func DefaultParams() Params {
 		SeedLimit:        10,
 		AbsentTermWeight: 0.5,
 		MinSeedStrength:  0.2,
+		VectorCosLow:     0.25,
+		VectorCosHigh:    0.6,
+		EmbedMaxWords:    200,
 		HopDecay:         0.8,
 		FiringThreshold:  0.1,
 		FanK0:            8,
@@ -173,6 +183,7 @@ func (p Params) Validate() error {
 		"firing_threshold": p.FiringThreshold, "ppr_restart": p.PPRRestart,
 		"absent_term_weight": p.AbsentTermWeight, "min_seed_strength": p.MinSeedStrength,
 		"learn_min_confidence": p.LearnMinConfidence, "learn_min_activation": p.LearnMinActivation,
+		"vector_cos_low": p.VectorCosLow, "vector_cos_high": p.VectorCosHigh,
 	}
 	for k, v := range in01 {
 		if v < 0 || v > 1 {
@@ -189,11 +200,14 @@ func (p Params) Validate() error {
 			return fmt.Errorf("%s must be > 0, got %g", k, v)
 		}
 	}
+	if p.VectorCosLow >= p.VectorCosHigh {
+		return fmt.Errorf("vector_cos_low (%g) must be below vector_cos_high (%g)", p.VectorCosLow, p.VectorCosHigh)
+	}
 	if p.FiringThreshold == 0 {
 		return fmt.Errorf("firing_threshold must be > 0")
 	}
 	if p.ReinforceTopK < 2 || p.SeedLimit < 1 || p.MaxNodes < 1 || p.MaxHops < 1 ||
-		p.EdgesPerNode < 1 || p.ResultLimit < 1 || p.MaxAccessRecords < 1 || p.TraceRetention < 1 {
+		p.EdgesPerNode < 1 || p.ResultLimit < 1 || p.MaxAccessRecords < 1 || p.TraceRetention < 1 || p.EmbedMaxWords < 1 {
 		return fmt.Errorf("integer limits must be positive (reinforce_top_k ≥ 2)")
 	}
 	return nil

@@ -13,19 +13,21 @@ import (
 )
 
 type fixture struct {
-	t   *testing.T
-	e   *Engine
-	ids map[string]string // short name → node ID
+	path string
+	t    *testing.T
+	e    *Engine
+	ids  map[string]string // short name → node ID
 }
 
-func newFixture(t *testing.T) *fixture {
+func newFixture(t *testing.T, opts ...Option) *fixture {
 	t.Helper()
-	e, err := Open(filepath.Join(t.TempDir(), "g.db"))
+	path := filepath.Join(t.TempDir(), "g.db")
+	e, err := Open(path, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { e.Close() })
-	f := &fixture{t: t, e: e, ids: map[string]string{}}
+	f := &fixture{t: t, e: e, path: path, ids: map[string]string{}}
 	f.add("sqlite", model.TypeDecision, "Use SQLite WAL for storage", "multi-process readers, one writer", "hooks spawn processes")
 	f.add("badger", model.TypeFact, "Badger holds an exclusive directory lock", "only one process may open the database", "")
 	f.add("hooks", model.TypeFact, "Claude Code hooks run as separate processes", "each hook invocation is a new process", "")

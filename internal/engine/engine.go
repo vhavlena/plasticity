@@ -3,12 +3,14 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/oklog/ulid/v2"
 
+	"github.com/vhavlena/plasticity/internal/embed"
 	"github.com/vhavlena/plasticity/internal/model"
 	"github.com/vhavlena/plasticity/internal/plasticity"
 	"github.com/vhavlena/plasticity/internal/store"
@@ -16,30 +18,68 @@ import (
 
 // Engine is a knowledge graph with plasticity.
 type Engine struct {
-	st *store.Store
-	P  model.Params
+	st   *store.Store
+	path string
+	P    model.Params
+
+	embCfg   *embed.Config  // stored configuration; nil: none
+	embID    string         // ID reported by the configured embedder
+	emb      embed.Embedder // active embedder, loaded lazily from embCfg
+	embOwned bool           // the engine created emb and must close it
+	injected bool           // emb was supplied by WithEmbedder
+	noEmbed  bool           // WithoutEmbeddings: lexical seeding only
+
+	// Warnings collects non-fatal problems (e.g. an unreachable embedder)
+	// for the caller to report.
+	Warnings []string
+}
+
+// Option customizes an engine at Open.
+type Option func(*Engine)
+
+// WithEmbedder makes the engine use emb for semantic search and indexing,
+// overriding the embedder configured in the database. The caller keeps
+// ownership: the engine does not close it. Use it to plug in custom or
+// experimental embedders without registering them.
+func WithEmbedder(emb embed.Embedder) Option {
+	return func(e *Engine) { e.emb, e.injected = emb, true }
+}
+
+// WithoutEmbeddings disables semantic search and indexing for this engine,
+// regardless of the stored configuration (e.g. for lexical-only baselines).
+func WithoutEmbeddings() Option {
+	return func(e *Engine) { e.noEmbed = true }
 }
 
 // Open opens the graph database at path.
-func Open(path string) (*Engine, error) {
+func Open(path string, opts ...Option) (*Engine, error) {
 	st, err := store.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	e := &Engine{st: st}
+	e := &Engine{st: st, path: path}
+	for _, o := range opts {
+		o(e)
+	}
 	if err := st.Read(func(tx *store.Tx) error {
 		p, err := tx.LoadParams()
+		if err != nil {
+			return err
+		}
 		e.P = p
-		return err
+		return e.loadEmbedConfig(tx)
 	}); err != nil {
 		st.Close()
-		return nil, fmt.Errorf("load params: %w", err)
+		return nil, fmt.Errorf("load settings: %w", err)
 	}
 	return e, nil
 }
 
-// Close closes the database.
-func (e *Engine) Close() error { return e.st.Close() }
+// Close closes the database and releases the embedder.
+func (e *Engine) Close() error {
+	e.releaseEmbedder()
+	return e.st.Close()
+}
 
 // timestamp is the wall-clock time used for IDs and informational
 // timestamps. Memory dynamics never depend on it: they run on recall counts.
@@ -47,7 +87,8 @@ func timestamp() time.Time { return time.Now().UTC() }
 
 // ---------------------------------------------------------------- nodes
 
-// AddNode validates and stores a new node, assigning ID and timestamps.
+// AddNode validates and stores a new node, assigning ID and timestamps, and
+// embeds it if embeddings are enabled.
 func (e *Engine) AddNode(n *model.Node) (*model.Node, error) {
 	now := timestamp()
 	n.ID = ulid.MustNew(ulid.Timestamp(now), ulid.DefaultEntropy()).String()
@@ -56,13 +97,20 @@ func (e *Engine) AddNode(n *model.Node) (*model.Node, error) {
 	if err := n.Validate(); err != nil {
 		return nil, err
 	}
+	vec := e.embedNode(context.Background(), n) // outside the write transaction
 	return n, e.st.Write(func(tx *store.Tx) error {
 		tick, err := tx.Tick()
 		if err != nil {
 			return err
 		}
 		n.CreatedTick = tick
-		return tx.InsertNode(n)
+		if err := tx.InsertNode(n); err != nil {
+			return err
+		}
+		if vec == nil {
+			return nil
+		}
+		return tx.PutVector(n.ID, vec.model, vec.hash, vec.blob)
 	})
 }
 
@@ -113,7 +161,34 @@ func (e *Engine) UpdateNode(id string, p NodePatch) (*model.Node, error) {
 		out = n
 		return tx.UpdateNode(n)
 	})
-	return out, err
+	if err != nil {
+		return nil, err
+	}
+	return out, e.refreshVector(out)
+}
+
+// refreshVector re-embeds a node whose text changed since it was embedded.
+func (e *Engine) refreshVector(n *model.Node) error {
+	model := e.activeModel()
+	if model == "" {
+		return nil
+	}
+	var stored string
+	if err := e.st.Read(func(tx *store.Tx) error {
+		var err error
+		stored, err = tx.VectorHash(n.ID, model)
+		return err
+	}); err != nil {
+		return err
+	}
+	if stored == textHash(embed.Truncate(nodeText(n), e.P.EmbedMaxWords)) {
+		return nil
+	}
+	vec := e.embedNode(context.Background(), n)
+	if vec == nil {
+		return nil
+	}
+	return e.st.Write(func(tx *store.Tx) error { return tx.PutVector(n.ID, vec.model, vec.hash, vec.blob) })
 }
 
 // DeleteNode removes a node and its synapses.

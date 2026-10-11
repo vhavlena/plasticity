@@ -683,3 +683,92 @@ func chunks(ss []string, size int) [][]string {
 	}
 	return out
 }
+
+// ---------------------------------------------------------------- vectors
+
+// PutVector stores the embedding of a node under the given model.
+func (t *Tx) PutVector(id, model, textHash string, vec []byte) error {
+	_, err := t.tx.Exec(`INSERT INTO node_vectors (node_id, model, text_hash, vec) VALUES (?,?,?,?)
+		ON CONFLICT (model, node_id) DO UPDATE SET text_hash=excluded.text_hash, vec=excluded.vec`,
+		id, model, textHash, vec)
+	return err
+}
+
+// VectorHash returns the text hash of a node's embedding under model, or ""
+// if the node has no embedding from that model.
+func (t *Tx) VectorHash(id, model string) (string, error) {
+	var h string
+	err := t.tx.QueryRow(`SELECT text_hash FROM node_vectors WHERE node_id = ? AND model = ?`, id, model).Scan(&h)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return h, err
+}
+
+// ScanVectors calls fn for every stored vector of the given model.
+func (t *Tx) ScanVectors(model string, fn func(id string, vec []byte) error) error {
+	rows, err := t.tx.Query(`SELECT node_id, vec FROM node_vectors WHERE model = ?`, model)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var vec []byte
+		if err := rows.Scan(&id, &vec); err != nil {
+			return err
+		}
+		if err := fn(id, vec); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// VectorCounts returns how many nodes have an embedding from model and how
+// many do not.
+func (t *Tx) VectorCounts(model string) (have, missing int, err error) {
+	err = t.tx.QueryRow(`SELECT
+		(SELECT count(*) FROM node_vectors WHERE model = ?),
+		(SELECT count(*) FROM nodes n WHERE NOT EXISTS (
+			SELECT 1 FROM node_vectors v WHERE v.node_id = n.id AND v.model = ?))`, model, model).Scan(&have, &missing)
+	return have, missing, err
+}
+
+// DeleteVectorsNotOf removes embeddings produced by any other model ("" removes all).
+func (t *Tx) DeleteVectorsNotOf(model string) (int64, error) {
+	res, err := t.tx.Exec(`DELETE FROM node_vectors WHERE model <> ?`, model)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// VectorModels returns the number of stored vectors per model.
+func (t *Tx) VectorModels() (map[string]int, error) {
+	out := map[string]int{}
+	var total int
+	return out, groupCount(t.tx, `SELECT model, count(*) FROM node_vectors GROUP BY model`, out, &total)
+}
+
+// ---------------------------------------------------------------- config
+
+// GetConfig returns a setting, or "" if unset.
+func (t *Tx) GetConfig(key string) (string, error) {
+	var v string
+	err := t.tx.QueryRow(`SELECT value FROM config WHERE key = ?`, key).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return v, err
+}
+
+// SetConfig stores a setting; an empty value deletes it.
+func (t *Tx) SetConfig(key, value string) error {
+	if value == "" {
+		_, err := t.tx.Exec(`DELETE FROM config WHERE key = ?`, key)
+		return err
+	}
+	_, err := t.tx.Exec(`INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
+}

@@ -89,4 +89,23 @@ CREATE TABLE params (
 	value TEXT NOT NULL
 );
 `,
+	`
+-- Embeddings for semantic seed search, one per node and embedder (model), so
+-- several embedders can be indexed side by side and compared. text_hash
+-- detects nodes edited since they were embedded.
+CREATE TABLE node_vectors (
+	node_id   TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+	model     TEXT NOT NULL,
+	text_hash TEXT NOT NULL,
+	vec       BLOB NOT NULL,
+	PRIMARY KEY (model, node_id)
+) WITHOUT ROWID;
+CREATE INDEX node_vectors_node ON node_vectors(node_id);
+
+-- Non-numeric settings (e.g. the embedder configuration, as JSON).
+CREATE TABLE config (
+	key   TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
+`,
 }

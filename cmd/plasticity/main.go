@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,15 +14,17 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/vhavlena/plasticity/internal/embed"
 	"github.com/vhavlena/plasticity/internal/engine"
 	"github.com/vhavlena/plasticity/internal/model"
 )
 
 type app struct {
-	dbPath string
-	pretty bool
-	out    io.Writer
-	in     io.Reader
+	dbPath  string
+	pretty  bool
+	noEmbed bool
+	out     io.Writer
+	in      io.Reader
 }
 
 func main() {
@@ -42,9 +45,15 @@ func defaultDB() string {
 	return filepath.Join(home, ".plasticity", "graph.db")
 }
 
-func (a *app) open() (*engine.Engine, error) { return engine.Open(a.dbPath) }
+func (a *app) open() (*engine.Engine, error) {
+	if a.noEmbed {
+		return engine.Open(a.dbPath, engine.WithoutEmbeddings())
+	}
+	return engine.Open(a.dbPath)
+}
 
-// with opens the engine, runs fn and prints its result as JSON.
+// with opens the engine, runs fn and prints its result as JSON on stdout.
+// Engine warnings go to stderr so stdout stays machine-readable.
 func (a *app) with(fn func(e *engine.Engine) (any, error)) error {
 	e, err := a.open()
 	if err != nil {
@@ -52,6 +61,9 @@ func (a *app) with(fn func(e *engine.Engine) (any, error)) error {
 	}
 	defer e.Close()
 	v, err := fn(e)
+	for _, w := range e.Warnings {
+		fmt.Fprintln(os.Stderr, "warning:", w)
+	}
 	if err != nil {
 		return err
 	}
@@ -77,12 +89,13 @@ func newRoot(out io.Writer, in io.Reader) *cobra.Command {
 	root.SetOut(out)
 	root.PersistentFlags().StringVar(&a.dbPath, "db", defaultDB(), "graph database file (env PLASTICITY_DB)")
 	root.PersistentFlags().BoolVar(&a.pretty, "pretty", false, "indent JSON output")
+	root.PersistentFlags().BoolVar(&a.noEmbed, "no-embed", false, "ignore embeddings: lexical seeding only (for comparisons)")
 
 	root.AddCommand(
 		a.initCmd(), a.addCmd(), a.getCmd(), a.updateCmd(), a.deleteCmd(),
 		a.linkCmd(), a.unlinkCmd(), a.searchCmd(), a.recallCmd(),
 		a.reinforceCmd(), a.feedbackCmd(), a.consolidateCmd(),
-		a.statsCmd(), a.exportCmd(), a.paramsCmd(),
+		a.statsCmd(), a.exportCmd(), a.paramsCmd(), a.embedCmd(),
 	)
 	return root
 }
@@ -456,5 +469,93 @@ func (a *app) paramsCmd() *cobra.Command {
 			})
 		},
 	})
+	return c
+}
+
+func (a *app) embedCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "embed",
+		Short: "Manage embeddings for semantic seed search",
+	}
+	status := &cobra.Command{
+		Use:   "status",
+		Short: "Show the embedder and how many neurons are indexed",
+		Args:  cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return a.with(func(e *engine.Engine) (any, error) { return e.EmbedStatus() })
+		},
+	}
+	var cfg embed.Config
+	var opts []string
+	enable := &cobra.Command{
+		Use:   "enable PROVIDER",
+		Short: "Select an embedder and index the neurons it has no vectors for",
+		Long: `Registered providers: ` + strings.Join(embed.Providers(), ", ") + `
+
+hugot   runs a sentence-transformer in-process (pure Go, no server). The model
+        (default ` + embed.DefaultHugotModel + `, ~90 MB) is downloaded
+        from Hugging Face next to the database unless --path points to a local copy.
+ollama  calls a local Ollama server (default model ` + embed.DefaultOllamaModel + `,
+        host ` + embed.DefaultOllamaHost + `); run 'ollama pull <model>' first.
+
+Vectors are stored per embedder: switching back to an embedder used before
+needs no re-indexing. Remove other embedders' vectors with 'embed prune'.`,
+		Args:      cobra.ExactArgs(1),
+		ValidArgs: embed.Providers(),
+		RunE: func(_ *cobra.Command, args []string) error {
+			cfg.Provider = args[0]
+			for _, o := range opts {
+				k, v, ok := strings.Cut(o, "=")
+				if !ok {
+					return fmt.Errorf("--opt %q: want key=value", o)
+				}
+				if cfg.Options == nil {
+					cfg.Options = map[string]string{}
+				}
+				cfg.Options[k] = v
+			}
+			return a.with(func(e *engine.Engine) (any, error) {
+				return e.EnableEmbedding(context.Background(), cfg)
+			})
+		},
+	}
+	enable.Flags().StringVar(&cfg.Model, "model", "", "model name (Hugging Face repo for hugot, Ollama model for ollama)")
+	enable.Flags().StringVar(&cfg.Path, "path", "", "hugot: local model directory (skips the download)")
+	enable.Flags().StringVar(&cfg.Host, "host", "", "ollama: server URL")
+	enable.Flags().StringVar(&cfg.QueryPrefix, "query-prefix", "", "text prepended to queries (asymmetric models)")
+	enable.Flags().StringVar(&cfg.DocPrefix, "doc-prefix", "", "text prepended to neurons (asymmetric models)")
+	enable.Flags().StringArrayVar(&opts, "opt", nil, "provider-specific option key=value (repeatable)")
+	var all bool
+	reindex := &cobra.Command{
+		Use:   "reindex",
+		Short: "Embed neurons that are missing a vector or were edited (--all: every neuron)",
+		Args:  cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return a.with(func(e *engine.Engine) (any, error) { return e.Reindex(context.Background(), all) })
+		},
+	}
+	reindex.Flags().BoolVar(&all, "all", false, "re-embed every neuron")
+	disable := &cobra.Command{
+		Use:   "disable",
+		Short: "Stop using embeddings (vectors are kept; see prune)",
+		Args:  cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return a.with(func(e *engine.Engine) (any, error) {
+				return map[string]bool{"enabled": false}, e.DisableEmbedding()
+			})
+		},
+	}
+	prune := &cobra.Command{
+		Use:   "prune",
+		Short: "Delete the vectors of all embedders except the active one",
+		Args:  cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return a.with(func(e *engine.Engine) (any, error) {
+				n, err := e.PruneVectors()
+				return map[string]int64{"deleted": n}, err
+			})
+		},
+	}
+	c.AddCommand(status, enable, reindex, disable, prune)
 	return c
 }

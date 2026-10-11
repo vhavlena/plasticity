@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"math"
 	"sort"
 
@@ -74,9 +75,12 @@ type RecallHit struct {
 	Activation float64     `json:"activation"`
 	BaseLevel  *float64    `json:"base_level,omitempty"`
 	IsSeed     bool        `json:"is_seed"`
-	Hops       int         `json:"hops"`
-	Path       []string    `json:"path"`
-	PathTitles []string    `json:"path_titles"`
+	// Similarity is the embedding cosine to the query, for semantic
+	// candidates.
+	Similarity *float64 `json:"similarity,omitempty"`
+	Hops       int      `json:"hops"`
+	Path       []string `json:"path"`
+	PathTitles []string `json:"path_titles"`
 }
 
 // RecallResult is the answer to a recall.
@@ -86,17 +90,23 @@ type RecallResult struct {
 	// TraceSkipped explains why no trace was stored despite a session.
 	TraceSkipped string `json:"trace_skipped,omitempty"`
 	Query        string `json:"query"`
-	// Confidence is the IDF-weighted share of the query explained by the
-	// lexical matches (see computeSeeds).
-	Confidence float64     `json:"confidence"`
-	Terms      []TermInfo  `json:"terms"`
-	Seeds      int         `json:"seeds"`
-	Reached    int         `json:"reached"`
-	Expanded   int         `json:"expanded"`
-	Hits       []RecallHit `json:"hits"`
+	// Confidence is max(LexicalConfidence, SemanticConfidence); it gates
+	// learning.
+	Confidence float64 `json:"confidence"`
+	// LexicalConfidence is the IDF-weighted share of the query explained by
+	// the BM25 matches; SemanticConfidence is the strongest calibrated
+	// embedding similarity (0 without embeddings).
+	LexicalConfidence  float64     `json:"lexical_confidence"`
+	SemanticConfidence float64     `json:"semantic_confidence"`
+	Terms              []TermInfo  `json:"terms"`
+	Seeds              int         `json:"seeds"`
+	Reached            int         `json:"reached"`
+	Expanded           int         `json:"expanded"`
+	Hits               []RecallHit `json:"hits"`
 }
 
-// Recall finds calibrated BM25 seeds, spreads activation through the
+// Recall finds calibrated lexical (BM25) and semantic (embedding) seeds,
+// spreads activation through the
 // weighted graph, ranks by λ1·graph + λ2·σ(B) + λ3·importance, and (unless
 // NoRecord) records accesses and, if the query confidence is high enough, a
 // trace for Hebbian learning.
@@ -117,6 +127,7 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 	}
 	now := timestamp()
 	res := &RecallResult{Query: req.Query, Terms: []TermInfo{}, Hits: []RecallHit{}}
+	qvec := e.embedQuery(context.Background(), req.Query) // nil: lexical only
 
 	err := e.st.Read(func(tx *store.Tx) error {
 		terms := queryTerms(req.Query)
@@ -128,12 +139,17 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 		if err != nil {
 			return err
 		}
-		sd, err := e.computeSeeds(tx, terms, hits)
+		sem, err := e.semanticSearch(tx, qvec, p.SeedLimit)
+		if err != nil {
+			return err
+		}
+		sd, err := e.computeSeeds(tx, terms, hits, sem)
 		if err != nil {
 			return err
 		}
 		seeds := sd.seeds
-		res.Confidence, res.Terms, res.Seeds = sd.confidence, sd.terms, len(seeds)
+		res.Confidence, res.Terms, res.Seeds = sd.confidence(), sd.terms, len(seeds)
+		res.LexicalConfidence, res.SemanticConfidence = sd.lexical, sd.semantic
 		if len(seeds) == 0 {
 			return nil
 		}
@@ -182,6 +198,9 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 			}
 			if len(acc[id]) > 0 {
 				h.BaseLevel = &b
+			}
+			if c, ok := sd.similarity[id]; ok {
+				h.Similarity = &c
 			}
 			for _, pid := range a.Path {
 				if pn := nodes[pid]; pn != nil {

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -310,5 +311,106 @@ func TestFireAgesEdgesExceptBetweenCoFiringNodes(t *testing.T) {
 			t.Fatalf("advance = %d %v", v, err)
 		}
 		return nil
+	})
+}
+
+func TestVectorsAndConfig(t *testing.T) {
+	s, _ := openTest(t)
+	mustWrite(t, s, func(tx *Tx) error {
+		for _, id := range []string{"a", "b"} {
+			if err := tx.InsertNode(node(id, id, "")); err != nil {
+				return err
+			}
+		}
+		if err := tx.PutVector("a", "m1", "h1", []byte{1, 2, 3, 4}); err != nil {
+			return err
+		}
+		if err := tx.PutVector("a", "m1", "h2", []byte{5, 6, 7, 8}); err != nil { // overwrite
+			return err
+		}
+		if err := tx.PutVector("b", "m0", "h", []byte{0, 0, 0, 0}); err != nil {
+			return err
+		}
+		if err := tx.PutVector("a", "m0", "h", []byte{9, 9, 9, 9}); err != nil { // second model, same node
+			return err
+		}
+		return tx.SetConfig("embedder", `{"provider":"x"}`)
+	})
+	mustWrite(t, s, func(tx *Tx) error {
+		if h, _ := tx.VectorHash("a", "m1"); h != "h2" {
+			t.Fatalf("hash = %q", h)
+		}
+		if h, _ := tx.VectorHash("b", "m1"); h != "" {
+			t.Fatalf("other model's vector visible: %q", h)
+		}
+		have, missing, err := tx.VectorCounts("m1")
+		if err != nil || have != 1 || missing != 1 {
+			t.Fatalf("counts: %d %d %v", have, missing, err)
+		}
+		var seen []string
+		_ = tx.ScanVectors("m1", func(id string, vec []byte) error {
+			seen = append(seen, id)
+			if vec[0] != 5 {
+				t.Fatalf("vec not overwritten: %v", vec)
+			}
+			return nil
+		})
+		if len(seen) != 1 {
+			t.Fatalf("scan: %v", seen)
+		}
+		if m, _ := tx.VectorModels(); m["m0"] != 2 || m["m1"] != 1 {
+			t.Fatalf("models side by side: %v", m)
+		}
+		if n, _ := tx.DeleteVectorsNotOf("m1"); n != 2 {
+			t.Fatalf("deleted %d other-model vectors", n)
+		}
+		if v, _ := tx.GetConfig("embedder"); v != `{"provider":"x"}` {
+			t.Fatalf("config: %q", v)
+		}
+		if err := tx.SetConfig("embedder", ""); err != nil {
+			return err
+		}
+		if v, _ := tx.GetConfig("embedder"); v != "" {
+			t.Fatalf("config not cleared: %q", v)
+		}
+		return tx.DeleteNode("a")
+	})
+	_ = s.Read(func(tx *Tx) error {
+		if have, _, _ := tx.VectorCounts("m1"); have != 0 {
+			t.Fatal("vector not cascaded on node delete")
+		}
+		return nil
+	})
+}
+
+// A database created at schema version 1 (before embeddings) is upgraded in
+// place, keeping its data.
+func TestMigrateFromVersion1(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(migrations[0] + `PRAGMA user_version = 1;`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO nodes (id, type, title, created_at, updated_at) VALUES ('old', 'fact', 'kept', 0, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	mustWrite(t, s, func(tx *Tx) error {
+		if n, err := tx.GetNode("old"); err != nil || n.Title != "kept" {
+			t.Fatalf("data lost in migration: %v %v", n, err)
+		}
+		if err := tx.PutVector("old", "m", "h", []byte{0, 0, 0, 0}); err != nil {
+			t.Fatalf("node_vectors missing after migration: %v", err)
+		}
+		return tx.SetConfig("k", "v")
 	})
 }

@@ -211,3 +211,57 @@ func TestConcurrentProcesses(t *testing.T) {
 		t.Fatalf("pending traces = %d, want %d", st.PendingTraces, n)
 	}
 }
+
+func TestEmbedCommands(t *testing.T) {
+	c := newCLI(t)
+	var st struct {
+		Active    string
+		Providers []string
+	}
+	c.json(&st, "embed", "status")
+	if st.Active != "" || len(st.Providers) < 2 {
+		t.Fatalf("embeddings must be off by default: %+v", st)
+	}
+	for _, args := range [][]string{
+		{"embed", "enable", "nope"},
+		{"embed", "reindex"},
+		{"embed", "enable", "ollama", "--host", "http://127.0.0.1:1"},
+		{"embed", "enable", "ollama", "--opt", "novalue"},
+	} {
+		if _, err := c.run(args...); err == nil {
+			t.Errorf("plasticity %v: expected failure", args)
+		}
+	}
+	c.json(&st, "embed", "status")
+	if st.Active != "" {
+		t.Fatal("a failed enable must not change the configuration")
+	}
+
+	dir := os.Getenv("PLASTICITY_TEST_MODEL")
+	if dir == "" {
+		t.Skip("set PLASTICITY_TEST_MODEL for the real-model part")
+	}
+	a := c.add("Use SQLite WAL for storage", "multiple processes can read concurrently while one writes")
+	c.add("Cooking pasta", "boil water and add salt")
+	var rep struct{ Embedded int }
+	c.json(&rep, "embed", "enable", "hugot", "--path", dir)
+	if rep.Embedded != 2 {
+		t.Fatalf("enable: %+v", rep)
+	}
+	var r struct {
+		Hits []struct {
+			Node       struct{ ID string }
+			Similarity *float64
+		}
+	}
+	c.json(&r, "recall", "which", "engine", "lets", "several", "programs", "write", "at", "once", "--no-record")
+	if len(r.Hits) == 0 || r.Hits[0].Node.ID != a || r.Hits[0].Similarity == nil {
+		t.Fatalf("semantic recall via CLI: %+v", r)
+	}
+	c.json(&r, "recall", "which", "engine", "lets", "several", "programs", "write", "at", "once", "--no-record", "--no-embed")
+	for _, h := range r.Hits {
+		if h.Similarity != nil {
+			t.Fatalf("--no-embed still used vectors: %+v", r)
+		}
+	}
+}
