@@ -5,13 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/vhavlena/plasticity/internal/embed"
+	"github.com/vhavlena/plasticity/internal/engine"
 	"github.com/vhavlena/plasticity/internal/eval"
 	"github.com/vhavlena/plasticity/internal/paths"
+	"github.com/vhavlena/plasticity/internal/store"
 )
 
 func (a *app) evalCmd() *cobra.Command {
@@ -20,9 +24,12 @@ func (a *app) evalCmd() *cobra.Command {
 		Short: "Evaluate recall and learning offline on scenarios",
 		Long: `Scenarios are JSON files with nodes, explicit links and sessions of queries
 labeled with their relevant nodes. 'eval run' replays them through the engine in
-a temporary database (your graph is never touched) and compares configurations.`,
+a temporary database (your graph is never touched) and compares configurations.
+
+'eval report' summarizes how the memory behaved in real Claude Code sessions
+(from the event log), and 'eval export' turns those sessions into a scenario.`,
 	}
-	c.AddCommand(a.evalRunCmd(), a.evalGenCmd())
+	c.AddCommand(a.evalRunCmd(), a.evalGenCmd(), a.evalReportCmd(), a.evalExportCmd())
 	return c
 }
 
@@ -186,4 +193,125 @@ to add random learned edges for scale and performance testing.`,
 	f.Float64Var(&c.ZipfS, "zipf", c.ZipfS, "query popularity skew (Zipf exponent)")
 	f.Int64Var(&c.Seed, "seed", c.Seed, "random seed")
 	return cmd
+}
+
+// sessionEvents reads the event log, restricted to the given sessions (all if
+// empty) and to events newer than since (all if 0).
+func (a *app) sessionEvents(e *engine.Engine, sessions []string, since time.Duration) ([]store.Event, error) {
+	var f store.EventFilter
+	if since > 0 {
+		f.Since = time.Now().Add(-since)
+	}
+	evs, err := e.Events(f)
+	if err != nil || len(sessions) == 0 {
+		return evs, err
+	}
+	return slices.DeleteFunc(evs, func(ev store.Event) bool { return !slices.Contains(sessions, ev.Session) }), nil
+}
+
+// openLog opens the graph read-mostly: no embedder and no logging.
+func (a *app) openLog() (*engine.Engine, error) {
+	return engine.Open(a.dbPath, engine.WithoutEmbeddings(), engine.WithoutLog())
+}
+
+func (a *app) evalReportCmd() *cobra.Command {
+	var (
+		sessions []string
+		since    time.Duration
+		asJSON   bool
+	)
+	c := &cobra.Command{
+		Use:   "report",
+		Short: "Summarize memory use in real sessions from the event log",
+		Long: `Computed from the event log written by the plugin hooks and commands:
+
+  recall      recalls per prompt, empty-recall rate, query confidence histogram,
+              latency, share of recalls with a hit later reported used
+  use         usage rate: injected neurons that Claude reported used
+  creation    neurons created per session, near-duplicates caught, created
+              neurons recalled or used again in later sessions, nudge response
+  learning    links created/potentiated/depressed by 'used', pruned by consolidation`,
+		Args: cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error {
+			e, err := a.openLog()
+			if err != nil {
+				return err
+			}
+			defer e.Close()
+			evs, err := a.sessionEvents(e, sessions, since)
+			if err != nil {
+				return err
+			}
+			u := eval.AnalyzeUsage(evs)
+			if asJSON {
+				return a.print(u)
+			}
+			return u.WriteText(a.out)
+		},
+	}
+	c.Flags().StringSliceVarP(&sessions, "session", "s", nil, "only these sessions")
+	c.Flags().DurationVar(&since, "since", 0, "only events newer than this (e.g. 168h)")
+	c.Flags().BoolVar(&asJSON, "json", false, "print the report as JSON")
+	return c
+}
+
+func (a *app) evalExportCmd() *cobra.Command {
+	var (
+		sessions  []string
+		since     time.Duration
+		out, name string
+		opt       eval.ExportOptions
+	)
+	c := &cobra.Command{
+		Use:   "export -o SCENARIO.json",
+		Short: "Turn logged sessions into a scenario for 'eval run'",
+		Long: `The current graph (nodes and typed links) becomes the scenario's knowledge
+base, each logged prompt recall a query, and the neurons Claude reported with
+'plasticity used' its relevant nodes. Recalls without reported use are skipped.
+
+labels:
+  turn     neurons reported used after the recall, before the next prompt
+  session  all neurons the session reported used
+
+Replay it with 'plasticity eval run SCENARIO.json' to compare parameters,
+learning modes and embedders on your own sessions.`,
+		Args: cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error {
+			if out == "" {
+				return fmt.Errorf("-o is required")
+			}
+			e, err := a.openLog()
+			if err != nil {
+				return err
+			}
+			defer e.Close()
+			evs, err := a.sessionEvents(e, sessions, since)
+			if err != nil {
+				return err
+			}
+			nodes, edges, err := e.Snapshot()
+			if err != nil {
+				return err
+			}
+			opt.Name = name
+			if opt.Name == "" {
+				opt.Name = "sessions-" + time.Now().Format("20060102")
+			}
+			s, st, err := eval.ExportSessions(evs, nodes, edges, opt)
+			if err != nil {
+				return err
+			}
+			if err := s.Save(out); err != nil {
+				return err
+			}
+			return a.print(map[string]any{"file": out, "nodes": len(s.Nodes), "links": len(s.Links), "stats": st})
+		},
+	}
+	c.Flags().StringVarP(&out, "out", "o", "", "output scenario file")
+	c.Flags().StringVar(&name, "name", "", "scenario name")
+	c.Flags().StringSliceVarP(&sessions, "session", "s", nil, "only these sessions")
+	c.Flags().DurationVar(&since, "since", 0, "only sessions' events newer than this (e.g. 168h)")
+	c.Flags().StringVar(&opt.Label, "label", eval.LabelTurn, "labeling: turn|session")
+	c.Flags().BoolVar(&opt.Learned, "learned", false, "also export learned links (preloaded with their current weights)")
+	return c
 }

@@ -195,6 +195,9 @@ plasticity embed enable hugot             # download all-MiniLM-L6-v2, index all
 plasticity embed enable ollama --model nomic-embed-text
 plasticity embed status | reindex [--all] | disable | prune
 plasticity --no-embed recall "query"      # lexical-only baseline on the same graph
+plasticity used -s SESSION ID ID          # report neurons that helped (feedback within the session)
+plasticity log [-s SESSION] [--since 24h] # event log
+plasticity eval report | export | run | gen
 ```
 
 Global flags: `--db`, `--pretty`.
@@ -324,6 +327,40 @@ only through links, learning or embeddings.
 | Unsupervised `reinforce` mostly learns junk | 86–88 % of its learned links are spurious; precision drops |
 | Recall scales | p50 ≈ 6 ms, p95 ≈ 13 ms at 50k nodes and 250k links (keywords only) |
 | Costs | `consolidate` takes 2.5 s at 50k nodes (one pass over edges); loading 250k links takes 24 s; semantic recall adds ~40 ms per query |
+
+### Real sessions
+
+The plugin logs every recall, `used` report, added neuron, nudge, episode
+and consolidation (option `log`). Two commands turn that log into evidence:
+
+```sh
+plasticity eval report [--since 168h] [-s SESSION] [--json]
+plasticity eval export -o mine.json [--since 168h] [-s SESSION] [--label turn|session] [--learned]
+plasticity eval run mine.json --learn none,feedback --embed none,hugot
+```
+
+`eval report` summarizes:
+
+| section | metrics |
+|---|---|
+| recall | recalls per prompt, empty-recall rate, query-confidence histogram, latency p50/p95, share of recalls with a hit later reported used |
+| use | **usage rate**: injected neurons that Claude reported used; used neurons that were found by search instead |
+| creation | neurons created per session, near-duplicates caught, created neurons recalled or used again in later sessions, nudge response |
+| learning | links created, potentiated and depressed by `used`; links pruned by consolidation; a per-day table |
+
+`eval export` turns your sessions into a scenario:
+- the current graph (nodes and typed links) becomes the knowledge base;
+- each logged prompt recall becomes a query;
+- the neurons reported with `plasticity used` in the same turn
+  (`--label turn`, the default) or session (`--label session`) become its
+  relevant nodes.
+
+Recalls without a reported use are skipped. Neurons created after a recall
+are never its labels. Each exported session's episode neuron is left out,
+since it quotes that session's prompts. Learned links are exported only with
+`--learned`, so a replay starts without the learning it measures. Replaying
+your own sessions lets you compare parameters, learning modes and embedders
+on real queries.
 
 ## Layout
 

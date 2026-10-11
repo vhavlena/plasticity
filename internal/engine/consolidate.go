@@ -176,6 +176,20 @@ func (e *Engine) Export(w io.Writer, format string) error {
 		return fmt.Errorf("unknown export format %q (json|dot)", format)
 	}
 	now := timestamp()
+	nodes, edges, err := e.Snapshot()
+	if err != nil {
+		return err
+	}
+	if format == "json" {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(map[string]any{"exported_at": now, "nodes": nodes, "edges": edges})
+	}
+	return writeDOT(w, nodes, edges)
+}
+
+// Snapshot returns all nodes and edges (with their effective weights).
+func (e *Engine) Snapshot() ([]*model.Node, []ExportEdge, error) {
 	var nodes []*model.Node
 	var edges []ExportEdge
 	err := e.st.Read(func(tx *store.Tx) error {
@@ -214,21 +228,13 @@ func (e *Engine) Export(w io.Writer, format string) error {
 		}
 		return nil
 	})
-	if err != nil {
-		return err
-	}
 	if nodes == nil {
 		nodes = []*model.Node{}
 	}
 	if edges == nil {
 		edges = []ExportEdge{}
 	}
-	if format == "json" {
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		return enc.Encode(map[string]any{"exported_at": now, "nodes": nodes, "edges": edges})
-	}
-	return writeDOT(w, nodes, edges)
+	return nodes, edges, err
 }
 
 var nodeShapes = map[model.NodeType]string{

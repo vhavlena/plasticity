@@ -442,6 +442,33 @@ func TestHookLifecycle(t *testing.T) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("hook must exit 0 on bad input: %v", err)
 	}
+
+	// The session is visible in the usage report ...
+	var u struct {
+		Sessions, Prompts, Recalls, Created, Nudges, Episodes int
+		UsedOfInj                                             int     `json:"used_of_injected"`
+		NudgeResponse                                         float64 `json:"nudge_response"`
+	}
+	c.json(&u, "eval", "report", "--json")
+	if u.Sessions != 1 || u.Prompts != 2 || u.Recalls != 1 || u.Created != 1 || u.UsedOfInj != 1 ||
+		u.Nudges != 1 || u.NudgeResponse != 1 || u.Episodes != 1 {
+		t.Fatalf("usage report: %+v", u)
+	}
+	if out, err := c.run("eval", "report"); err != nil || !strings.Contains(string(out), "usage rate") {
+		t.Fatalf("text report: %v\n%s", err, out)
+	}
+	// ... and exports as a scenario that replays.
+	scen := filepath.Join(dir, "sessions.json")
+	var ex struct {
+		Stats struct{ Queries int }
+	}
+	c.json(&ex, "eval", "export", "-o", scen)
+	if ex.Stats.Queries != 1 {
+		t.Fatalf("export: %+v", ex)
+	}
+	if out, err := c.run("eval", "run", scen, "--learn", "none", "--passes", "1"); err != nil || !strings.Contains(string(out), "none") {
+		t.Fatalf("replaying the export: %v\n%s", err, out)
+	}
 }
 
 // The plugin's hooks must call existing hook subcommands, and every handler
