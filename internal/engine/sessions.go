@@ -32,6 +32,27 @@ const (
 	EventError        = "error"
 )
 
+// Recall sources, logged with each recall event.
+const (
+	RecallSourcePrompt = "prompt" // automatic recall for a user prompt (hook)
+	RecallSourceClaude = "claude" // recall Claude ran itself during a session
+)
+
+// LogRecall logs a recall of a session: its source, query, hits and
+// confidence, latency and the characters injected into the context.
+func (e *Engine) LogRecall(session, source, query string, r *RecallResult, latency time.Duration, injectedChars int) {
+	hits := make([]map[string]any, len(r.Hits))
+	for i, h := range r.Hits {
+		hits[i] = map[string]any{"id": h.Node.ID, "score": h.Score, "activation": h.Activation, "seed": h.IsSeed, "hops": h.Hops}
+	}
+	e.Log(session, EventRecall, map[string]any{
+		"source": source, "query": truncate(query, 500), "hits": hits, "confidence": r.Confidence,
+		"lexical": r.LexicalConfidence, "semantic": r.SemanticConfidence, "seeds": r.Seeds,
+		"latency_ms": float64(latency) / float64(time.Millisecond), "injected_chars": injectedChars,
+		"recall_id": r.RecallID, "trace_skipped": r.TraceSkipped,
+	})
+}
+
 // WithoutLog disables the event log for this engine.
 func WithoutLog() Option {
 	return func(e *Engine) { e.noLog = true }

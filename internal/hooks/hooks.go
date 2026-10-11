@@ -127,11 +127,14 @@ func SessionStart(e *engine.Engine, in Input, project string, cfg Config) (*Outp
 	text := fmt.Sprintf(`Plasticity long-term memory is active: %d neurons, %s scope, %s.
 This session's ID is %s.
 - Memories relevant to each prompt are injected automatically.
+- Recall more yourself when that context is missing: before a design decision, when starting
+  work in an unfamiliar area, when stuck on an error, before re-investigating a problem:
+  plasticity recall "<specific question or error>" --session %s
 - Store durable knowledge (decisions with rationale, root causes, working procedures, preferences):
   plasticity add -t decision|fact|procedure|concept|rationale|question --title "..." -c "..." -r "why" --session %s
 - Report memories you actually used (also ones you found via plasticity search/recall):
   plasticity used --session %s ID [ID...]
-Use the plasticity:memory skill for guidance.`, st.Nodes, cfg.Scope, search, id, id, id)
+Use the plasticity:memory skill for guidance.`, st.Nodes, cfg.Scope, search, id, id, id, id)
 	return contextOutput("SessionStart", text), nil
 }
 
@@ -161,16 +164,7 @@ func Prompt(e *engine.Engine, in Input, project string, cfg Config) (*Output, er
 	}
 	latency := time.Since(start)
 	text := FormatMemories(r, in.SessionID, cfg.ContextBudget)
-	hits := make([]map[string]any, len(r.Hits))
-	for i, h := range r.Hits {
-		hits[i] = map[string]any{"id": h.Node.ID, "score": h.Score, "activation": h.Activation, "seed": h.IsSeed, "hops": h.Hops}
-	}
-	e.Log(in.SessionID, engine.EventRecall, map[string]any{
-		"prompt": truncate(in.Prompt, 500), "hits": hits, "confidence": r.Confidence,
-		"lexical": r.LexicalConfidence, "semantic": r.SemanticConfidence, "seeds": r.Seeds,
-		"latency_ms": float64(latency) / float64(time.Millisecond), "injected_chars": len(text),
-		"recall_id": r.RecallID, "trace_skipped": r.TraceSkipped,
-	})
+	e.LogRecall(in.SessionID, engine.RecallSourcePrompt, in.Prompt, r, latency, len(text))
 	if text == "" {
 		return nil, nil
 	}

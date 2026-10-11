@@ -16,7 +16,9 @@ import (
 // here).
 type (
 	recallPayload struct {
-		Prompt string `json:"prompt"`
+		Source string `json:"source"`
+		Query  string `json:"query"`
+		Prompt string `json:"prompt"` // query of events logged before "query" existed
 		Hits   []struct {
 			ID   string `json:"id"`
 			Seed bool   `json:"seed"`
@@ -37,6 +39,22 @@ type (
 		Op string `json:"op"`
 	}
 )
+
+// source returns the recall's source (events before sources existed were
+// all prompt recalls).
+func (p recallPayload) source() string {
+	if p.Source == "" {
+		return engine.RecallSourcePrompt
+	}
+	return p.Source
+}
+
+func (p recallPayload) query() string {
+	if p.Query != "" {
+		return p.Query
+	}
+	return p.Prompt
+}
 
 func decode[T any](ev store.Event) (T, bool) {
 	var v T
@@ -90,8 +108,22 @@ type Usage struct {
 	Pruned       int `json:"links_pruned"`
 	Consolidated int `json:"consolidations"`
 
+	// BySource splits recall and use by recall source: "prompt" (automatic,
+	// per user prompt) and "claude" (recalls Claude ran itself).
+	BySource map[string]*SourceUsage `json:"by_source"`
+
 	Errors map[string]int `json:"errors,omitempty"` // by operation
 	Days   []UsageDay     `json:"days"`
+}
+
+// SourceUsage is recall and use of one recall source. A neuron used in a
+// session counts for every source that surfaced it in that session.
+type SourceUsage struct {
+	Recalls   int     `json:"recalls"`
+	Empty     int     `json:"empty"`
+	Injected  int     `json:"injected"` // distinct (session, neuron) pairs surfaced
+	UsedOfInj int     `json:"used_of_injected"`
+	UsageRate float64 `json:"usage_rate"`
 }
 
 // UsageDay is the activity of one calendar day.
@@ -123,7 +155,7 @@ func confidenceBucket(c float64) string {
 
 // AnalyzeUsage computes the usage report from events (oldest first).
 func AnalyzeUsage(events []store.Event) *Usage {
-	u := &Usage{Confidence: map[string]int{}, Errors: map[string]int{}}
+	u := &Usage{Confidence: map[string]int{}, Errors: map[string]int{}, BySource: map[string]*SourceUsage{}}
 	for _, b := range ConfidenceBuckets {
 		u.Confidence[b.Name] = 0
 	}
@@ -138,6 +170,7 @@ func AnalyzeUsage(events []store.Event) *Usage {
 
 	type pair struct{ session, id string }
 	injected := map[pair]bool{}
+	injectedBy := map[string]map[pair]bool{} // source -> pairs it surfaced
 	used := map[pair]bool{}
 	sessions := map[string]bool{}
 	daySessions := map[string]map[string]bool{}
@@ -173,6 +206,14 @@ func AnalyzeUsage(events []store.Event) *Usage {
 			if !ok {
 				continue
 			}
+			src := p.source()
+			su := u.BySource[src]
+			if su == nil {
+				su = &SourceUsage{}
+				u.BySource[src] = su
+				injectedBy[src] = map[pair]bool{}
+			}
+			su.Recalls++
 			u.Recalls++
 			d.Recalls++
 			conf += p.Confidence
@@ -183,12 +224,14 @@ func AnalyzeUsage(events []store.Event) *Usage {
 			if len(p.Hits) == 0 {
 				u.EmptyRate++
 				d.Empty++
+				su.Empty++
 				continue
 			}
 			set := map[string]bool{}
 			for _, h := range p.Hits {
 				set[h.ID] = true
 				injected[pair{ev.Session, h.ID}] = true
+				injectedBy[src][pair{ev.Session, h.ID}] = true
 				if s, ok := createdIn[h.ID]; ok && s != ev.Session {
 					createdRecalled[h.ID] = true
 				}
@@ -278,6 +321,17 @@ func AnalyzeUsage(events []store.Event) *Usage {
 	if u.Injected > 0 {
 		u.UsageRate = float64(u.UsedOfInj) / float64(u.Injected)
 	}
+	for src, su := range u.BySource {
+		su.Injected = len(injectedBy[src])
+		for p := range injectedBy[src] {
+			if used[p] {
+				su.UsedOfInj++
+			}
+		}
+		if su.Injected > 0 {
+			su.UsageRate = float64(su.UsedOfInj) / float64(su.Injected)
+		}
+	}
 	nonEmpty, useful := 0, 0
 	for s, sets := range recallHits {
 		for _, set := range sets {
@@ -330,7 +384,19 @@ func (u *Usage) WriteText(w io.Writer) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	row := func(k, f string, a ...any) { fmt.Fprintf(tw, "  %s\t"+f+"\n", append([]any{k}, a...)...) }
 	fmt.Fprintln(tw, "recall")
-	row("recalls", "%d (%s of prompts; trivial prompts are skipped)", u.Recalls, ratio(u.Recalls, u.Prompts))
+	row("recalls", "%d", u.Recalls)
+	for _, src := range []string{engine.RecallSourcePrompt, engine.RecallSourceClaude} {
+		su := u.BySource[src]
+		if su == nil {
+			su = &SourceUsage{}
+		}
+		switch src {
+		case engine.RecallSourcePrompt:
+			row("  per prompt", "%d (%s of prompts; trivial prompts are skipped), %d empty", su.Recalls, ratio(su.Recalls, u.Prompts), su.Empty)
+		case engine.RecallSourceClaude:
+			row("  by Claude", "%d (%.1f per session), %d empty", su.Recalls, perSession(su.Recalls, u.Sessions), su.Empty)
+		}
+	}
 	row("empty", "%s", pct(u.EmptyRate))
 	row("hits / recall", "%.1f, %.0f chars injected", u.MeanHits, u.MeanInjected)
 	row("confidence", "mean %.2f  %s", u.MeanConf, u.confidenceText())
@@ -338,6 +404,11 @@ func (u *Usage) WriteText(w io.Writer) error {
 	row("useful recalls", "%s of non-empty recalls had a hit reported used", pct(u.RecallsUseful))
 	fmt.Fprintln(tw, "use")
 	row("usage rate", "%s (%d of %d injected neurons reported used)", pct(u.UsageRate), u.UsedOfInj, u.Injected)
+	for _, src := range []string{engine.RecallSourcePrompt, engine.RecallSourceClaude} {
+		if su := u.BySource[src]; su != nil {
+			row("  from "+src+" recalls", "%s (%d of %d)", pct(su.UsageRate), su.UsedOfInj, su.Injected)
+		}
+	}
 	row("used, not injected", "%d (found via search/recall)", u.UsedOther)
 	fmt.Fprintln(tw, "creation")
 	row("created", "%d (%.1f per session), %d episodes, %d outside sessions", u.Created, u.CreatedPerSession, u.Episodes, u.CreatedOutside)
@@ -369,6 +440,13 @@ func (u *Usage) confidenceText() string {
 		s += fmt.Sprintf(" %s:%d", b.Name, u.Confidence[b.Name])
 	}
 	return "[" + s[1:] + "]"
+}
+
+func perSession(n, sessions int) float64 {
+	if sessions == 0 {
+		return 0
+	}
+	return float64(n) / float64(sessions)
 }
 
 func ratio(a, b int) string {

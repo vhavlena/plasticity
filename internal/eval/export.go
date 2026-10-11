@@ -13,7 +13,7 @@ import (
 // Labeling strategies for exported queries.
 const (
 	// LabelTurn: a recall's relevant neurons are those reported used after
-	// it and before the session's next recall (the same turn).
+	// it and before the session's next recalled user prompt (the same turn).
 	LabelTurn = "turn"
 	// LabelSession: every recall of a session is labeled with all neurons the
 	// session reported used.
@@ -129,7 +129,7 @@ func ExportSessions(events []store.Event, nodes []*model.Node, edges []engine.Ex
 				continue
 			}
 			p, ok := decode[recallPayload](ev)
-			if !ok || p.Prompt == "" {
+			if !ok || p.query() == "" {
 				continue
 			}
 			st.Recalls++
@@ -140,7 +140,11 @@ func ExportSessions(events []store.Event, nodes []*model.Node, edges []engine.Ex
 				turn := map[string]bool{}
 				for _, next := range sl.events[i+1:] {
 					if next.Kind == engine.EventRecall {
-						break
+						// The next recalled user prompt starts a new turn; short
+						// prompts ("ok, go ahead") are not recalled and continue it.
+						if np, ok := decode[recallPayload](next); ok && np.source() == engine.RecallSourcePrompt {
+							break
+						}
 					}
 					if next.Kind != engine.EventUsed {
 						continue
@@ -167,7 +171,7 @@ func ExportSessions(events []store.Event, nodes []*model.Node, edges []engine.Ex
 				st.Unlabeled++
 				continue
 			}
-			sess.Queries = append(sess.Queries, Query{Q: p.Prompt, Relevant: rel})
+			sess.Queries = append(sess.Queries, Query{Q: p.query(), Relevant: rel})
 		}
 		if len(sess.Queries) > 0 {
 			s.Sessions = append(s.Sessions, sess)

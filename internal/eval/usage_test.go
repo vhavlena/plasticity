@@ -37,13 +37,23 @@ func (l *eventLog) prompt(session, prompt string, conf float64, hits ...string) 
 		"latency_ms": 2.0 + float64(len(l.evs)), "injected_chars": 100 * len(hits)})
 }
 
+// claude logs a recall Claude ran itself (no prompt event).
+func (l *eventLog) claude(session, query string, conf float64, hits ...string) {
+	hs := make([]map[string]any, len(hits))
+	for i, h := range hits {
+		hs[i] = map[string]any{"id": h}
+	}
+	l.add(session, engine.EventRecall, map[string]any{"source": engine.RecallSourceClaude, "query": query,
+		"hits": hs, "confidence": conf, "latency_ms": 3.0})
+}
+
 func (l *eventLog) used(session string, created int, ids ...string) {
 	l.add(session, engine.EventUsed, map[string]any{"ids": ids, "report": engine.LearnReport{Created: created}})
 }
 
-// twoSessions: S1 recalls A,B and uses A, creates N; S2 recalls N and uses
-// it and C (found by search); a duplicate is refused; a nudge in S2 is
-// answered.
+// twoSessions: S1 recalls A,B and uses A, creates N; S2 recalls N, then
+// Claude recalls C itself, and both are used; a duplicate is refused; a nudge
+// in S2 is answered.
 func twoSessions() *eventLog {
 	l := &eventLog{}
 	l.prompt("S1", "how do we store the graph", 0.9, "A", "B")
@@ -53,6 +63,7 @@ func twoSessions() *eventLog {
 	l.add("S1", engine.EventEpisode, map[string]any{"id": "E1"})
 	l.at = l.at.Add(24 * time.Hour)
 	l.prompt("S2", "the new decision please", 0.5, "N", "B")
+	l.claude("S2", "cache invalidation rule", 0.7, "C")
 	l.add("S2", engine.EventNudge, map[string]int{"tool_calls": 7})
 	l.used("S2", 1, "N", "C")
 	l.add("S2", engine.EventAdd, map[string]any{"title": "new", "duplicate_of": "N"})
@@ -72,18 +83,28 @@ func TestAnalyzeUsage(t *testing.T) {
 	}
 	check("sessions", float64(u.Sessions), 2)
 	check("prompts", float64(u.Prompts), 3)
-	check("recalls", float64(u.Recalls), 3)
-	check("empty rate", u.EmptyRate, 1.0/3)
-	check("mean hits", u.MeanHits, 4.0/3)
-	check("mean confidence", u.MeanConf, 0.5)
+	check("recalls", float64(u.Recalls), 4)
+	check("empty rate", u.EmptyRate, 1.0/4)
+	check("mean hits", u.MeanHits, 5.0/4)
+	check("mean confidence", u.MeanConf, 0.55)
+	check("bucket 0.6-0.8", float64(u.Confidence["0.6-0.8"]), 1)
 	check("bucket <0.25", float64(u.Confidence["<0.25"]), 1)
 	check("bucket 0.4-0.6", float64(u.Confidence["0.4-0.6"]), 1)
 	check("bucket >=0.8", float64(u.Confidence[">=0.8"]), 1)
-	// Injected pairs: S1/A, S1/B, S2/N, S2/B; used: S1/A, S2/N (+ S2/C not injected).
-	check("injected", float64(u.Injected), 4)
-	check("used of injected", float64(u.UsedOfInj), 2)
-	check("usage rate", u.UsageRate, 0.5)
-	check("used other", float64(u.UsedOther), 1)
+	// Injected pairs: S1/A, S1/B, S2/N, S2/B by prompt recalls, S2/C by
+	// Claude's recall; used: S1/A, S2/N, S2/C.
+	check("injected", float64(u.Injected), 5)
+	check("used of injected", float64(u.UsedOfInj), 3)
+	check("usage rate", u.UsageRate, 0.6)
+	check("used other", float64(u.UsedOther), 0)
+	pr, cl := u.BySource[engine.RecallSourcePrompt], u.BySource[engine.RecallSourceClaude]
+	if pr == nil || cl == nil {
+		t.Fatalf("by source: %+v", u.BySource)
+	}
+	check("prompt recalls", float64(pr.Recalls), 3)
+	check("prompt usage rate", pr.UsageRate, 0.5)
+	check("claude recalls", float64(cl.Recalls), 1)
+	check("claude usage rate", cl.UsageRate, 1)
 	check("useful recalls", u.RecallsUseful, 1)
 	check("created", float64(u.Created), 1)
 	check("created outside", float64(u.CreatedOutside), 1)
@@ -144,7 +165,8 @@ func TestExportSessions(t *testing.T) {
 	}
 	// S1: first recall labeled A, the empty one unlabeled; S2: N and C;
 	// S3: P was created after the recall and "gone" no longer exists.
-	if st.Recalls != 4 || st.Queries != 2 || st.Unlabeled != 2 || st.Dropped != 2 || st.Sessions != 2 {
+	// Claude's recall in S2 is a query of its own, labeled by the same turn.
+	if st.Recalls != 5 || st.Queries != 3 || st.Unlabeled != 2 || st.Dropped != 2 || st.Sessions != 2 {
 		t.Fatalf("stats: %+v", st)
 	}
 	if q := s.Sessions[0].Queries[0]; q.Q != "how do we store the graph" || strings.Join(q.Relevant, ",") != "A" {
@@ -153,13 +175,16 @@ func TestExportSessions(t *testing.T) {
 	if q := s.Sessions[1].Queries[0]; strings.Join(q.Relevant, ",") != "N,C" {
 		t.Errorf("S2 query: %+v", q)
 	}
+	if q := s.Sessions[1].Queries[1]; q.Q != "cache invalidation rule" || strings.Join(q.Relevant, ",") != "N,C" {
+		t.Errorf("S2 Claude query: %+v", q)
+	}
 
 	// Session labels give every recall of the session all its used neurons.
 	s, st, err = ExportSessions(l.evs, nodes, edges, ExportOptions{Label: LabelSession, Learned: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Queries != 3 || len(s.Links) != 2 || strings.Join(s.Sessions[0].Queries[1].Relevant, ",") != "A" {
+	if st.Queries != 4 || len(s.Links) != 2 || strings.Join(s.Sessions[0].Queries[1].Relevant, ",") != "A" {
 		t.Errorf("session labels: %+v, %+v", st, s.Sessions)
 	}
 

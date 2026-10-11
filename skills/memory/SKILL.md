@@ -1,6 +1,6 @@
 ---
 name: memory
-description: Long-term memory (plasticity knowledge graph). Use when a decision is made, a root cause or non-obvious fact is discovered, a procedure works, or the user states a preference — to store it as a neuron; when you need past decisions, rationale or project context — to search memory; and when injected <plasticity-memories> helped — to report them as used.
+description: Long-term memory (plasticity knowledge graph). Use when a decision is made, a root cause or non-obvious fact is discovered, a procedure works, or the user states a preference — to store it as a neuron; before design decisions, in unfamiliar code, when stuck on an error, or when past decisions, rationale or project context may exist — to recall from memory; and when memories helped — to report them as used.
 allowed-tools: Bash(plasticity *)
 ---
 
@@ -47,13 +47,29 @@ Use `--force` only if it is genuinely different.
 **Do not store**: transient task state, things obvious from the code or git
 history, secrets/credentials, or guesses you have not verified.
 
-## 2. Find knowledge
+## 2. Recall knowledge when you need it
+
+Each user prompt gets an automatic recall, but the knowledge you need often
+only becomes clear while working. Recall yourself:
+
+- **before a design decision** or choosing between alternatives: was this decided before, and why?
+- **when starting work in an unfamiliar area**, module or file: conventions, pitfalls, past decisions;
+- **when stuck on an error** or unexpected behavior: recall with the error message, since root causes are stored;
+- **before re-investigating** something that may have been solved in an earlier session;
+- when the user refers to earlier work ("like last time", "as we decided").
 
 ```sh
-plasticity recall "how do hooks access the database" --no-record   # associative: follows links
-plasticity search "WAL"                                             # keywords only
-plasticity get <ID>                                                  # a neuron with its links
+plasticity recall "why does the hook time out on large repos" --session <SESSION_ID>   # associative: follows links
+plasticity search "WAL"                                                                 # keywords only
+plasticity get <ID>                                                                      # a neuron with its links
 ```
+
+- Ask a **specific question** in natural language, or paste the key line of an
+  error. A vague query ("storage") seeds weakly and returns little.
+- Always pass `--session`: your recall then takes part in learning and is
+  measured. Use `--no-record` only for browsing that has nothing to do with the task.
+- An empty result is an answer too: nothing is known, so proceed and consider
+  storing what you find.
 
 Injected memories are *possibly* relevant: verify before relying on them.
 If one is wrong or outdated, fix it with `plasticity update ID ...` (or

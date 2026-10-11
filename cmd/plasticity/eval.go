@@ -225,9 +225,11 @@ func (a *app) evalReportCmd() *cobra.Command {
 		Short: "Summarize memory use in real sessions from the event log",
 		Long: `Computed from the event log written by the plugin hooks and commands:
 
-  recall      recalls per prompt, empty-recall rate, query confidence histogram,
-              latency, share of recalls with a hit later reported used
-  use         usage rate: injected neurons that Claude reported used
+  recall      automatic recalls per prompt and recalls Claude ran itself,
+              empty-recall rate, query confidence histogram, latency, share of
+              recalls with a hit later reported used
+  use         usage rate: surfaced neurons that Claude reported used, overall
+              and per recall source
   creation    neurons created per session, near-duplicates caught, created
               neurons recalled or used again in later sessions, nudge response
   learning    links created/potentiated/depressed by 'used', pruned by consolidation`,
@@ -266,11 +268,12 @@ func (a *app) evalExportCmd() *cobra.Command {
 		Use:   "export -o SCENARIO.json",
 		Short: "Turn logged sessions into a scenario for 'eval run'",
 		Long: `The current graph (nodes and typed links) becomes the scenario's knowledge
-base, each logged prompt recall a query, and the neurons Claude reported with
-'plasticity used' its relevant nodes. Recalls without reported use are skipped.
+base, each logged recall (automatic per prompt, or run by Claude with
+--session) a query, and the neurons Claude reported with 'plasticity used' its
+relevant nodes. Recalls without reported use are skipped.
 
 labels:
-  turn     neurons reported used after the recall, before the next prompt
+  turn     neurons reported used after the recall, before the next recalled prompt
   session  all neurons the session reported used
 
 Replay it with 'plasticity eval run SCENARIO.json' to compare parameters,

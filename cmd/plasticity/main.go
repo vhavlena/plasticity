@@ -395,10 +395,17 @@ connections carry activation further than weak ones. Accesses are recorded
 			if req.Rerank != "" && req.Rerank != "ppr" {
 				return fmt.Errorf("--rerank: only 'ppr' is supported")
 			}
-			return a.with(func(e *engine.Engine) (any, error) { return e.Recall(req) })
+			return a.with(func(e *engine.Engine) (any, error) {
+				start := time.Now()
+				r, err := e.Recall(req)
+				if err == nil && req.Session != "" && !req.NoRecord {
+					e.LogRecall(req.Session, engine.RecallSourceClaude, req.Query, r, time.Since(start), 0)
+				}
+				return r, err
+			})
 		},
 	}
-	c.Flags().StringVarP(&req.Session, "session", "s", "", "session ID; stores a trace for Hebbian learning")
+	c.Flags().StringVarP(&req.Session, "session", "s", "", "session ID; stores a trace for Hebbian learning and logs the recall")
 	c.Flags().IntVarP(&req.Limit, "limit", "n", 0, "max results (default: result_limit)")
 	c.Flags().Float64Var(&req.Threshold, "threshold", 0, "firing threshold θ (default: firing_threshold)")
 	c.Flags().Float64Var(&req.HopDecay, "hop-decay", 0, "per-hop decay δ (default: hop_decay)")

@@ -403,6 +403,14 @@ func TestHookLifecycle(t *testing.T) {
 		Node         struct{ ID string }
 		ContextLinks int `json:"context_links"`
 	}
+	// Claude recalls by itself during the session; the recall is logged.
+	var own struct {
+		Hits []struct{ Node struct{ ID string } }
+	}
+	c.json(&own, "recall", "keep", "sqlite", "writes", "short", "--session", "S1")
+	if len(own.Hits) == 0 {
+		t.Fatalf("Claude's recall found nothing")
+	}
 	c.json(nil, "used", "--session", "S1", sqlite)
 	c.json(&added, "add", "-t", "decision", "--title", "Keep writes short", "-r", "avoid lock waits", "--session", "S1")
 	if added.ContextLinks != 1 {
@@ -446,12 +454,14 @@ func TestHookLifecycle(t *testing.T) {
 	// The session is visible in the usage report ...
 	var u struct {
 		Sessions, Prompts, Recalls, Created, Nudges, Episodes int
-		UsedOfInj                                             int     `json:"used_of_injected"`
-		NudgeResponse                                         float64 `json:"nudge_response"`
+		UsedOfInj                                             int                              `json:"used_of_injected"`
+		NudgeResponse                                         float64                          `json:"nudge_response"`
+		BySource                                              map[string]struct{ Recalls int } `json:"by_source"`
 	}
 	c.json(&u, "eval", "report", "--json")
-	if u.Sessions != 1 || u.Prompts != 2 || u.Recalls != 1 || u.Created != 1 || u.UsedOfInj != 1 ||
-		u.Nudges != 1 || u.NudgeResponse != 1 || u.Episodes != 1 {
+	if u.Sessions != 1 || u.Prompts != 2 || u.Recalls != 2 || u.Created != 1 || u.UsedOfInj != 1 ||
+		u.Nudges != 1 || u.NudgeResponse != 1 || u.Episodes != 1 ||
+		u.BySource["prompt"].Recalls != 1 || u.BySource["claude"].Recalls != 1 {
 		t.Fatalf("usage report: %+v", u)
 	}
 	if out, err := c.run("eval", "report"); err != nil || !strings.Contains(string(out), "usage rate") {
@@ -463,7 +473,7 @@ func TestHookLifecycle(t *testing.T) {
 		Stats struct{ Queries int }
 	}
 	c.json(&ex, "eval", "export", "-o", scen)
-	if ex.Stats.Queries != 1 {
+	if ex.Stats.Queries != 2 { // the prompt recall and Claude's recall
 		t.Fatalf("export: %+v", ex)
 	}
 	if out, err := c.run("eval", "run", scen, "--learn", "none", "--passes", "1"); err != nil || !strings.Contains(string(out), "none") {
