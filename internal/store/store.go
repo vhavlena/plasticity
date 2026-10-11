@@ -790,10 +790,11 @@ type Session struct {
 }
 
 // TouchSession creates the session or updates its last-seen time (and
-// project, if it was unknown).
+// project, if it was unknown). Activity reopens an ended session: a session
+// closed as abandoned may be resumed.
 func (t *Tx) TouchSession(id, project string, at time.Time) error {
 	_, err := t.tx.Exec(`INSERT INTO sessions (id, project, started_at, last_seen) VALUES (?, ?, ?, ?)
-		ON CONFLICT (id) DO UPDATE SET last_seen = excluded.last_seen,
+		ON CONFLICT (id) DO UPDATE SET last_seen = excluded.last_seen, ended_at = 0,
 		project = CASE WHEN sessions.project = '' THEN excluded.project ELSE sessions.project END`,
 		id, project, ts(at), ts(at))
 	return err

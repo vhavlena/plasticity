@@ -284,7 +284,9 @@ func AnalyzeUsage(events []store.Event) *Usage {
 			u.Nudges++
 			nudgedAt[ev.Session] = ev.ID
 		case engine.EventEpisode:
-			u.Episodes++
+			if p, ok := decode[struct{ Updated bool }](ev); ok && !p.Updated {
+				u.Episodes++ // refreshes of resumed sessions' episodes are not new episodes
+			}
 		case engine.EventConsolidate:
 			if p, ok := decode[engine.ConsolidateReport](ev); ok {
 				u.Consolidated++

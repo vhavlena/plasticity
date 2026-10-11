@@ -50,6 +50,10 @@ type Config struct {
 	Reflect     bool   // Stop-hook nudge to store/report memories
 	Log         bool   // event log
 	Embeddings  string // auto | off
+	// SessionIdle: a session idle this long without a SessionEnd hook is
+	// closed (its episode created) at the next session start. Resuming it
+	// later reopens it, and its episode is refreshed when it ends again.
+	SessionIdle time.Duration
 	// ContextBudget caps the injected characters per prompt (Claude Code
 	// truncates additional context above 10,000 characters).
 	ContextBudget int
@@ -58,7 +62,7 @@ type Config struct {
 // ConfigFromEnv reads CLAUDE_PLUGIN_OPTION_<KEY> (as declared or upper-case),
 // with PLASTICITY_<KEY> overrides for use outside the plugin.
 func ConfigFromEnv() Config {
-	c := Config{Scope: "global", RecallLimit: 6, Reflect: true, Log: true, Embeddings: "auto", ContextBudget: 3000}
+	c := Config{Scope: "global", RecallLimit: 6, Reflect: true, Log: true, Embeddings: "auto", ContextBudget: 3000, SessionIdle: 48 * time.Hour}
 	get := func(key string) (string, bool) {
 		for _, k := range []string{"PLASTICITY_" + strings.ToUpper(key), "CLAUDE_PLUGIN_OPTION_" + strings.ToUpper(key), "CLAUDE_PLUGIN_OPTION_" + key} {
 			if v, ok := os.LookupEnv(k); ok && strings.TrimSpace(v) != "" {
@@ -73,6 +77,11 @@ func ConfigFromEnv() Config {
 	if v, ok := get("recall_limit"); ok {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			c.RecallLimit = n
+		}
+	}
+	if v, ok := get("session_idle_hours"); ok {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.SessionIdle = time.Duration(n) * time.Hour
 		}
 	}
 	if v, ok := get("reflect"); ok {
@@ -104,7 +113,7 @@ func SessionStart(e *engine.Engine, in Input, project string, cfg Config) (*Outp
 	}
 	// Close sessions that ended without a SessionEnd hook (crash, kill,
 	// hook timeout), so their episodes are not lost.
-	if stale, err := e.AbandonedSessions(abandonedAfter, 3); err == nil {
+	if stale, err := e.AbandonedSessions(cfg.SessionIdle, 3); err == nil {
 		for _, s := range stale {
 			files, _ := EditedFiles(s.Transcript, s.Project)
 			if _, err := e.EndSession(s.ID, files); err != nil {
@@ -137,10 +146,6 @@ This session's ID is %s.
 Use the plasticity:memory skill for guidance.`, st.Nodes, cfg.Scope, search, id, id, id, id)
 	return contextOutput("SessionStart", text), nil
 }
-
-// abandonedAfter is the idle time after which an unended session is closed
-// (a variable for tests).
-var abandonedAfter = 6 * time.Hour
 
 // trivial reports prompts that need no recall: slash commands and very
 // short inputs (acknowledgements).

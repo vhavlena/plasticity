@@ -44,6 +44,7 @@ For development: `claude --plugin-dir /path/to/plasticity`.
 | `scope` | `global` | one memory for all projects, or `project` (one per git repository) |
 | `recall_limit` | 6 | memories injected per prompt |
 | `reflect` | true | end-of-task request to store or report memories |
+| `session_idle_hours` | 48 | a session left without a clean exit gets its episode after this idle time; resuming it later refreshes the episode |
 | `embeddings` | `auto` | `auto` (local model), `ollama`, or `off` |
 | `log` | true | local event log (`plasticity eval report` summarizes it) |
 

@@ -260,9 +260,9 @@ func TestSessionStartClosesAbandonedSessions(t *testing.T) {
 	Prompt(e, Input{SessionID: "old", Prompt: "tell me about sqlite storage"}, "/repo", Config{RecallLimit: 5, ContextBudget: 3000})
 	e.Used("old", []string{id})
 	// "old" never got a SessionEnd. A later session start closes it.
-	defer func(d time.Duration) { abandonedAfter = d }(abandonedAfter)
-	abandonedAfter = -time.Hour
-	if _, err := SessionStart(e, Input{SessionID: "new"}, "/repo", cfg); err != nil {
+	idle := cfg
+	idle.SessionIdle = -time.Hour
+	if _, err := SessionStart(e, Input{SessionID: "new"}, "/repo", idle); err != nil {
 		t.Fatal(err)
 	}
 	s, _ := e.Session("old")
@@ -273,4 +273,50 @@ func TestSessionStartClosesAbandonedSessions(t *testing.T) {
 	if err != nil || !strings.Contains(ep.Content, "x.go") {
 		t.Fatalf("episode of abandoned session: %v %+v", err, ep)
 	}
+
+	// Days later the user resumes "old": it reopens, and its real end
+	// refreshes the same episode with the later prompt and neuron.
+	if _, err := e.Reinforce([]string{id, s.EpisodeID}); err != nil {
+		t.Fatal(err)
+	}
+	learned := edgeWeight(t, e, id, s.EpisodeID)
+	SessionStart(e, Input{SessionID: "old", Source: "resume"}, "/repo", cfg)
+	Prompt(e, Input{SessionID: "old", Prompt: "now add the vacuum schedule"}, "/repo", Config{RecallLimit: 5, ContextBudget: 3000})
+	if s, _ := e.Session("old"); !s.EndedAt.IsZero() {
+		t.Fatalf("resumed session still closed: %+v", s)
+	}
+	later := add(t, e, "Vacuum weekly", "y")
+	e.Used("old", []string{later})
+	rep, err := SessionEnd(e, Input{SessionID: "old", TranscriptPath: tr}, "/repo")
+	if err != nil || rep.Episode == nil || !rep.Updated || rep.Episode.ID != s.EpisodeID {
+		t.Fatalf("resumed session end: %v %+v", err, rep)
+	}
+	if !strings.Contains(rep.Episode.Content, "vacuum schedule") || rep.Links != 1 {
+		t.Fatalf("episode not refreshed (links %d): %s", rep.Links, rep.Episode.Content)
+	}
+	if w := edgeWeight(t, e, id, s.EpisodeID); w != learned {
+		t.Fatalf("refresh reset a learned link: %v -> %v", learned, w)
+	}
+	if s, _ := e.Session("old"); s.EndedAt.IsZero() {
+		t.Fatal("resumed session not closed again")
+	}
+	// Ending it twice changes nothing.
+	if rep, err := SessionEnd(e, Input{SessionID: "old"}, "/repo"); err != nil || rep.Episode != nil {
+		t.Fatalf("second end: %v %+v", err, rep)
+	}
+}
+
+func edgeWeight(t *testing.T, e *engine.Engine, a, b string) float64 {
+	t.Helper()
+	v, err := e.GetNode(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ed := range v.Edges {
+		if ed.Other == b {
+			return ed.Weight
+		}
+	}
+	t.Fatalf("no edge %s–%s", a, b)
+	return 0
 }

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -260,21 +261,31 @@ func normTitle(s string) string {
 
 // linkToSession links node to the session's most recent used/created
 // neurons, records it under role, and returns the number of links made.
+// Existing links are kept as they are (their learned weights included).
 func (e *Engine) linkToSession(session, node, role string) (int, error) {
-	var ctxIDs []string
+	var links []LinkSpec
 	err := e.st.Read(func(tx *store.Tx) error {
-		var err error
-		ctxIDs, err = tx.SessionNodes(session, RoleUsed, RoleCreated)
-		return err
+		ctxIDs, err := tx.SessionNodes(session, RoleUsed, RoleCreated)
+		if err != nil {
+			return err
+		}
+		for i := len(ctxIDs) - 1; i >= 0 && len(links) < e.P.ContextLinks; i-- {
+			if ctxIDs[i] == node {
+				continue
+			}
+			a, b := model.CanonicalPair(node, ctxIDs[i])
+			old, err := tx.GetEdge(a, b, model.KindAssociative)
+			if err != nil {
+				return err
+			}
+			if old == nil {
+				links = append(links, LinkSpec{Src: node, Dst: ctxIDs[i], Kind: model.KindAssociative, Weight: e.P.ContextLinkWeight})
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return 0, err
-	}
-	var links []LinkSpec
-	for i := len(ctxIDs) - 1; i >= 0 && len(links) < e.P.ContextLinks; i-- {
-		if ctxIDs[i] != node {
-			links = append(links, LinkSpec{Src: node, Dst: ctxIDs[i], Kind: model.KindAssociative, Weight: e.P.ContextLinkWeight})
-		}
 	}
 	if err := e.AddLinks(links); err != nil {
 		return 0, err
@@ -336,6 +347,7 @@ func (e *Engine) AbandonedSessions(idle time.Duration, limit int) ([]*store.Sess
 // EpisodeReport summarizes EndSession.
 type EpisodeReport struct {
 	Episode      *model.Node        `json:"episode,omitempty"`
+	Updated      bool               `json:"updated,omitempty"` // an existing episode was refreshed
 	Links        int                `json:"links"`
 	Consolidated *ConsolidateReport `json:"consolidated,omitempty"`
 }
@@ -344,35 +356,46 @@ type EpisodeReport struct {
 // (first prompt as title, prompts and edited files as content), links it to
 // the neurons the session used or created, and consolidates every
 // ConsolidateEverySessions sessions. Sessions without prompts get no episode.
+// A session that was resumed after being closed gets its episode refreshed
+// with the later prompts, files and neurons.
 func (e *Engine) EndSession(session string, files []string) (*EpisodeReport, error) {
 	s, err := e.Session(session)
 	if err != nil || s == nil {
 		return nil, err
 	}
 	rep := &EpisodeReport{}
-	if s.EpisodeID == "" && s.Prompts > 0 {
-		evs, err := e.Events(store.EventFilter{Session: session, Kind: EventPrompt, Limit: 20})
+	if !s.EndedAt.IsZero() {
+		return rep, nil // already closed and not resumed since
+	}
+	var ep *model.Node
+	if s.EpisodeID != "" {
+		if ep, err = e.node(s.EpisodeID); errors.Is(err, store.ErrNotFound) {
+			ep = nil // deleted by the user: create a new one
+		} else if err != nil {
+			return nil, err
+		}
+	}
+	if s.Prompts > 0 {
+		content, err := e.episodeContent(s, files)
 		if err != nil {
 			return nil, err
 		}
-		var prompts []string
-		for _, ev := range evs {
-			var p struct{ Prompt string }
-			if json.Unmarshal(ev.Payload, &p) == nil && p.Prompt != "" {
-				prompts = append(prompts, "- "+truncate(p.Prompt, 160))
+		if ep == nil {
+			ep = &model.Node{Type: model.TypeEpisode, Title: "Session: " + truncate(s.FirstPrompt, 100),
+				Content: content, Source: "session:" + session}
+			if s.Project != "" {
+				ep.Tags = []string{"project:" + s.Project}
 			}
-		}
-		content := fmt.Sprintf("Session with %d prompts.\nPrompts:\n%s", s.Prompts, strings.Join(prompts, "\n"))
-		if len(files) > 0 {
-			content += "\nFiles edited: " + strings.Join(files, ", ")
-		}
-		ep := &model.Node{Type: model.TypeEpisode, Title: "Session: " + truncate(s.FirstPrompt, 100),
-			Content: content, Source: "session:" + session}
-		if s.Project != "" {
-			ep.Tags = []string{"project:" + s.Project}
-		}
-		if err := e.AddNodes([]*model.Node{ep}); err != nil {
-			return nil, err
+			if err := e.AddNodes([]*model.Node{ep}); err != nil {
+				return nil, err
+			}
+		} else {
+			rep.Updated = true
+			if ep.Content != content {
+				if ep, err = e.UpdateNode(ep.ID, NodePatch{Content: &content}); err != nil {
+					return nil, err
+				}
+			}
 		}
 		if rep.Links, err = e.linkToSession(session, ep.ID, "episode"); err != nil {
 			return nil, err
@@ -394,7 +417,7 @@ func (e *Engine) EndSession(session string, files []string) (*EpisodeReport, err
 		return rep, err
 	}
 	if rep.Episode != nil {
-		e.Log(session, EventEpisode, map[string]any{"id": rep.Episode.ID, "links": rep.Links})
+		e.Log(session, EventEpisode, map[string]any{"id": rep.Episode.ID, "links": rep.Links, "updated": rep.Updated})
 	}
 	if ended%e.P.ConsolidateEverySessions == 0 {
 		c, err := e.Consolidate(false)
@@ -406,6 +429,45 @@ func (e *Engine) EndSession(session string, files []string) (*EpisodeReport, err
 	}
 	return rep, nil
 }
+
+// node returns a stored node.
+func (e *Engine) node(id string) (*model.Node, error) {
+	var n *model.Node
+	err := e.st.Read(func(tx *store.Tx) error {
+		var err error
+		n, err = tx.GetNode(id)
+		return err
+	})
+	return n, err
+}
+
+// episodeContent renders a session's prompts and edited files.
+func (e *Engine) episodeContent(s *store.Session, files []string) (string, error) {
+	evs, err := e.Events(store.EventFilter{Session: s.ID, Kind: EventPrompt})
+	if err != nil {
+		return "", err
+	}
+	var prompts []string
+	for _, ev := range evs {
+		var p struct{ Prompt string }
+		if json.Unmarshal(ev.Payload, &p) == nil && p.Prompt != "" {
+			prompts = append(prompts, "- "+truncate(p.Prompt, 160))
+		}
+	}
+	if len(prompts) > maxEpisodePrompts { // keep the beginning and the end
+		n := len(prompts)
+		prompts = append(append(prompts[:maxEpisodePrompts/2:maxEpisodePrompts/2], fmt.Sprintf("- … %d more prompts …", n-maxEpisodePrompts)),
+			prompts[n-maxEpisodePrompts/2:]...)
+	}
+	content := fmt.Sprintf("Session with %d prompts.\nPrompts:\n%s", s.Prompts, strings.Join(prompts, "\n"))
+	if len(files) > 0 {
+		content += "\nFiles edited: " + strings.Join(files, ", ")
+	}
+	return content, nil
+}
+
+// maxEpisodePrompts bounds the prompts quoted in an episode.
+const maxEpisodePrompts = 20
 
 // truncate cuts s to at most n runes, adding an ellipsis.
 func truncate(s string, n int) string {
