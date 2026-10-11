@@ -414,3 +414,69 @@ func TestMigrateFromVersion1(t *testing.T) {
 		return tx.SetConfig("k", "v")
 	})
 }
+
+func TestSessionsAndEvents(t *testing.T) {
+	s, _ := openTest(t)
+	mustWrite(t, s, func(tx *Tx) error {
+		for _, id := range []string{"a", "b"} {
+			if err := tx.InsertNode(node(id, id, "")); err != nil {
+				return err
+			}
+		}
+		if err := tx.TouchSession("S", "", t0); err != nil {
+			return err
+		}
+		if err := tx.TouchSession("S", "/repo", t0.Add(time.Minute)); err != nil {
+			return err
+		}
+		if err := tx.CountPrompt("S", "first question"); err != nil {
+			return err
+		}
+		if err := tx.CountPrompt("S", "second"); err != nil {
+			return err
+		}
+		if err := tx.AddSessionNodes("S", "used", []string{"b", "a"}, t0); err != nil {
+			return err
+		}
+		if err := tx.AddSessionNodes("S", "created", []string{"a"}, t0.Add(time.Second)); err != nil {
+			return err
+		}
+		if err := tx.LogEvent(t0, "S", "recall", []byte(`{"q":"x"}`)); err != nil {
+			return err
+		}
+		if err := tx.LogEvent(t0, "T", "add", nil); err != nil {
+			return err
+		}
+		return tx.SetNudged("S")
+	})
+	_ = s.Read(func(tx *Tx) error {
+		ss, err := tx.GetSession("S")
+		if err != nil || ss.Project != "/repo" || ss.Prompts != 2 || ss.FirstPrompt != "first question" || !ss.Nudged {
+			t.Fatalf("session: %v %+v", err, ss)
+		}
+		if missing, _ := tx.GetSession("nope"); missing != nil {
+			t.Fatal("unknown session returned")
+		}
+		ids, _ := tx.SessionNodes("S", "used", "created")
+		if len(ids) != 2 || ids[0] != "b" || ids[1] != "a" {
+			t.Fatalf("session nodes in order without duplicates: %v", ids)
+		}
+		evs, _ := tx.Events(EventFilter{Session: "S"})
+		if len(evs) != 1 || evs[0].Kind != "recall" || string(evs[0].Payload) != `{"q":"x"}` {
+			t.Fatalf("events: %+v", evs)
+		}
+		if all, _ := tx.Events(EventFilter{Kind: "add"}); len(all) != 1 || string(all[0].Payload) != "{}" {
+			t.Fatalf("kind filter: %+v", all)
+		}
+		return nil
+	})
+	mustWrite(t, s, func(tx *Tx) error {
+		if err := tx.EndSession("S", "ep", t0.Add(time.Hour)); err != nil {
+			return err
+		}
+		if n, _ := tx.CountEndedSessions(); n != 1 {
+			t.Fatalf("ended sessions: %d", n)
+		}
+		return nil
+	})
+}

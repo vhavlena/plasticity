@@ -8,15 +8,17 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/vhavlena/plasticity/internal/embed"
 	"github.com/vhavlena/plasticity/internal/engine"
 	"github.com/vhavlena/plasticity/internal/model"
+	"github.com/vhavlena/plasticity/internal/paths"
+	"github.com/vhavlena/plasticity/internal/store"
 )
 
 type app struct {
@@ -34,15 +36,14 @@ func main() {
 	}
 }
 
+// defaultDB resolves the database from PLASTICITY_DB or the scope (global
+// graph, or the graph of the current project).
 func defaultDB() string {
-	if p := os.Getenv("PLASTICITY_DB"); p != "" {
-		return p
-	}
-	home, err := os.UserHomeDir()
+	wd, err := os.Getwd()
 	if err != nil {
-		return "graph.db"
+		wd = "."
 	}
-	return filepath.Join(home, ".plasticity", "graph.db")
+	return paths.DB(wd)
 }
 
 func (a *app) open() (*engine.Engine, error) {
@@ -87,12 +88,12 @@ func newRoot(out io.Writer, in io.Reader) *cobra.Command {
 		SilenceErrors: true,
 	}
 	root.SetOut(out)
-	root.PersistentFlags().StringVar(&a.dbPath, "db", defaultDB(), "graph database file (env PLASTICITY_DB)")
+	root.PersistentFlags().StringVar(&a.dbPath, "db", defaultDB(), "graph database file (env PLASTICITY_DB; default by scope: $PLASTICITY_HOME/graph.db, or per project with PLASTICITY_SCOPE=project)")
 	root.PersistentFlags().BoolVar(&a.pretty, "pretty", false, "indent JSON output")
 	root.PersistentFlags().BoolVar(&a.noEmbed, "no-embed", false, "ignore embeddings: lexical seeding only (for comparisons)")
 
 	root.AddCommand(
-		a.initCmd(), a.addCmd(), a.getCmd(), a.updateCmd(), a.deleteCmd(),
+		a.initCmd(), a.addCmd(), a.usedCmd(), a.logCmd(), a.hookCmd(), a.getCmd(), a.updateCmd(), a.deleteCmd(),
 		a.linkCmd(), a.unlinkCmd(), a.searchCmd(), a.recallCmd(),
 		a.reinforceCmd(), a.feedbackCmd(), a.consolidateCmd(),
 		a.statsCmd(), a.exportCmd(), a.paramsCmd(), a.embedCmd(), a.evalCmd(),
@@ -150,10 +151,17 @@ func (a *app) addCmd() *cobra.Command {
 	var f nodeFlags
 	var stdin bool
 	var links []string
+	var opt engine.AddOptions
 	c := &cobra.Command{
 		Use:   "add",
 		Short: "Add a neuron (flags, or a JSON node on stdin with --stdin)",
-		Args:  cobra.NoArgs,
+		Long: `Adds a neuron after a duplicate check: if a neuron with the same title or a
+near-identical embedding exists, nothing is inserted and the result names it in
+"duplicate_of" (update or link it instead, or pass --force).
+
+With --session, the neuron is linked to the neurons the session used or created
+before it, so new knowledge is encoded in its context.`,
+		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			n := &model.Node{Type: model.NodeType(f.typ), Title: f.title, Content: f.content,
 				Rationale: f.rationale, Tags: f.tags, Source: f.source, Importance: f.importance}
@@ -168,22 +176,68 @@ func (a *app) addCmd() *cobra.Command {
 				return err
 			}
 			return a.with(func(e *engine.Engine) (any, error) {
-				added, err := e.AddNode(n)
-				if err != nil {
-					return nil, err
-				}
-				for _, l := range specs {
-					if _, err := e.Link(added.ID, l.dst, l.kind, l.weight); err != nil {
-						return nil, fmt.Errorf("node %s added, but link to %s failed: %w", added.ID, l.dst, err)
+				for _, l := range specs { // validate targets before inserting anything
+					if _, err := e.GetNode(l.dst); err != nil {
+						return nil, fmt.Errorf("--link: %w", err)
 					}
 				}
-				return added, nil
+				res, err := e.AddNodeChecked(n, opt)
+				if err != nil || res.Node == nil {
+					return res, err
+				}
+				for _, l := range specs {
+					if _, err := e.Link(res.Node.ID, l.dst, l.kind, l.weight); err != nil {
+						return nil, fmt.Errorf("node %s added, but link to %s failed: %w", res.Node.ID, l.dst, err)
+					}
+				}
+				return res, nil
 			})
 		},
 	}
 	f.register(c)
 	c.Flags().BoolVar(&stdin, "stdin", false, "read the node as JSON from stdin")
 	c.Flags().StringArrayVar(&links, "link", nil, "link new node → ID, as ID[:kind[:weight]] (repeatable)")
+	c.Flags().StringVarP(&opt.Session, "session", "s", "", "session ID: link to the session's context and record as created by it")
+	c.Flags().BoolVar(&opt.Force, "force", false, "insert even if a near-duplicate exists")
+	return c
+}
+
+func (a *app) usedCmd() *cobra.Command {
+	var session string
+	c := &cobra.Command{
+		Use:   "used ID [ID...]",
+		Short: "Report neurons that were actually used (strengthens them together)",
+		Long: `Report the memories that helped, including ones found via search or recall.
+With --session this is feedback: the used neurons are associated with each other
+and links to neurons recalled in the session but not used are weakened. Without
+a session, at least two neurons are reinforced as used together.`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return a.with(func(e *engine.Engine) (any, error) { return e.Used(session, args) })
+		},
+	}
+	c.Flags().StringVarP(&session, "session", "s", "", "session ID")
+	return c
+}
+
+func (a *app) logCmd() *cobra.Command {
+	var f store.EventFilter
+	var since time.Duration
+	c := &cobra.Command{
+		Use:   "log",
+		Short: "Show the event log (recalls, used, added neurons, nudges, episodes)",
+		Args:  cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error {
+			if since > 0 {
+				f.Since = time.Now().Add(-since)
+			}
+			return a.with(func(e *engine.Engine) (any, error) { return e.Events(f) })
+		},
+	}
+	c.Flags().StringVarP(&f.Session, "session", "s", "", "only this session")
+	c.Flags().StringVar(&f.Kind, "kind", "", "only this event kind")
+	c.Flags().DurationVar(&since, "since", 0, "only events newer than this (e.g. 24h)")
+	c.Flags().IntVarP(&f.Limit, "limit", "n", 0, "at most this many events")
 	return c
 }
 

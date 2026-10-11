@@ -7,11 +7,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/vhavlena/plasticity/internal/embed"
 	"github.com/vhavlena/plasticity/internal/model"
+	"github.com/vhavlena/plasticity/internal/paths"
 	"github.com/vhavlena/plasticity/internal/store"
 )
 
@@ -232,8 +232,8 @@ func (e *Engine) EmbedStatus() (*EmbedStatus, error) {
 	return st, err
 }
 
-// ModelsDir is where downloaded models are kept: next to the database.
-func (e *Engine) ModelsDir() string { return filepath.Join(filepath.Dir(e.path), "models") }
+// ModelsDir is where downloaded models are kept (shared by all graphs).
+func (e *Engine) ModelsDir() string { return paths.ModelsDir() }
 
 // EnableEmbedding configures a registered embedder: it runs the provider's
 // setup (e.g. model download), verifies the embedder works, stores the

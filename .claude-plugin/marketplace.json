@@ -1,0 +1,12 @@
+{
+  "name": "plasticity",
+  "owner": { "name": "Vojtěch Havlena" },
+  "description": "Brain-like long-term memory for Claude Code",
+  "plugins": [
+    {
+      "name": "plasticity",
+      "source": ".",
+      "description": "Knowledge-graph memory with Hebbian learning and interference-based forgetting"
+    }
+  ]
+}

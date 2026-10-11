@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/vhavlena/plasticity/internal/embed"
 	"github.com/vhavlena/plasticity/internal/eval"
+	"github.com/vhavlena/plasticity/internal/paths"
 )
 
 func (a *app) evalCmd() *cobra.Command {
@@ -125,7 +125,7 @@ were retrieved (only links, learning or embeddings can find those).`,
 
 // evalEmbedders builds one embedder per --embed entry (nil for "none").
 func (a *app) evalEmbedders(names []string, base embed.Config) ([]embed.Embedder, error) {
-	modelsDir := filepath.Join(filepath.Dir(a.dbPath), "models")
+	modelsDir := paths.ModelsDir()
 	var out []embed.Embedder
 	for _, n := range names {
 		if n == "none" {

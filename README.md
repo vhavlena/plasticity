@@ -6,9 +6,59 @@ information and its rationale) connected by weighted **synapses** (edges).
 Neurons used together get wired together, and unused connections fade and
 eventually disappear.
 
-This repository contains part 1: the Go core and a JSON-speaking CLI. Part 2
-will wire the CLI into Claude Code through hooks (automatic recall and
-learning) and skills (deliberate storing and linking).
+The repository is a Claude Code plugin, and the Go engine with its
+JSON-speaking CLI lives in the same repo.
+
+## Install as a Claude Code plugin
+
+Requires [Go](https://go.dev/dl) ≥ 1.27. The engine is built from source on
+first use.
+
+```
+/plugin marketplace add vhavlena/plasticity
+/plugin install plasticity@plasticity
+```
+
+On Claude Code 2.1.275 or later, this works in one step:
+`/plugin install plasticity --marketplace vhavlena/plasticity`. To work on the
+plugin itself, run `claude --plugin-dir /path/to/plasticity`.
+
+**What happens:**
+- **First session.** A background hook builds the engine into
+  `~/.plasticity/bin` (about a minute) and downloads a local embedding model
+  (~90 MB, all-MiniLM-L6-v2). Memory works from the next prompt or session
+  onwards; until the model is ready, search is keyword-only.
+- **Every prompt.** Relevant memories are recalled and injected as
+  `<plasticity-memories>`: up to 6 entries, about 3,000 characters, ~5 ms
+  without embeddings.
+- **While working.** Through the `plasticity:memory` skill, Claude stores
+  durable knowledge with `plasticity add`: decisions with rationale, root
+  causes, procedures, preferences. A duplicate check keeps the graph clean,
+  and each new neuron is linked to what the session was working on. Claude
+  also reports which memories helped with `plasticity used`, which is what
+  teaches the graph which knowledge belongs together.
+- **End of a task.** Once per session, after substantive work, Claude is asked
+  to store anything worth keeping. This can be turned off with `reflect`.
+- **End of a session.** An `episode` neuron records the session's prompts and
+  edited files, linked to the knowledge it used and created. Sessions that end
+  without the hook are closed at the next session start.
+
+**Commands:** `/plasticity:remember <text>`, `/plasticity:recall <query>`,
+`/plasticity:status`, `/plasticity:setup`.
+
+**Options** (`/plugin` → plasticity → configure):
+
+| option | default | meaning |
+|---|---|---|
+| `scope` | `global` | one memory for all projects, or `project` for one per git repository |
+| `recall_limit` | 6 | memories injected per prompt |
+| `reflect` | true | end-of-task request to store or report memories |
+| `embeddings` | `auto` | `auto` (local model), `ollama`, or `off` |
+| `log` | true | local event log for evaluation (`plasticity log`) |
+
+**Data:** all state lives in `~/.plasticity/` (override with
+`PLASTICITY_HOME`): the graph, models and the built binary. It never leaves
+your machine.
 
 ## Build
 
@@ -18,8 +68,9 @@ go test -race ./...
 ```
 
 Storage is a single SQLite file in WAL mode (pure Go, no cgo, no server). The
-default location is `~/.plasticity/graph.db`; override it with `--db` or
-`$PLASTICITY_DB`. Several processes (parallel hooks, concurrent sessions) can
+default location is `~/.plasticity/graph.db`, or
+`~/.plasticity/projects/<hash>/graph.db` with `PLASTICITY_SCOPE=project`.
+Override it with `--db` or `$PLASTICITY_DB`. Several processes (parallel hooks, concurrent sessions) can
 use the same file at once: readers never block, and writers queue for
 milliseconds.
 

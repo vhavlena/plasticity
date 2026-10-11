@@ -1,0 +1,44 @@
+{
+  "name": "plasticity",
+  "version": "0.1.0",
+  "description": "Brain-like long-term memory for Claude Code: a knowledge graph of neurons (decisions, facts, rationales, procedures) with Hebbian learning and interference-based forgetting. Recalls relevant memories on every prompt.",
+  "author": { "name": "Vojtěch Havlena" },
+  "license": "MIT",
+  "keywords": ["memory", "knowledge-graph", "hebbian", "long-term-memory"],
+  "userConfig": {
+    "scope": {
+      "type": "string",
+      "title": "Memory scope",
+      "description": "global: one memory shared by all projects; project: one memory per git repository",
+      "default": "global",
+      "options": ["global", "project"]
+    },
+    "recall_limit": {
+      "type": "number",
+      "title": "Memories per prompt",
+      "description": "Maximum number of memories injected with each prompt",
+      "default": 6,
+      "min": 1,
+      "max": 20
+    },
+    "reflect": {
+      "type": "boolean",
+      "title": "End-of-task reflection",
+      "description": "Once per session, after substantive work, ask Claude to store durable knowledge and report used memories",
+      "default": true
+    },
+    "embeddings": {
+      "type": "string",
+      "title": "Semantic search",
+      "description": "auto: download a local embedding model (~90 MB, all-MiniLM-L6-v2) on first use; ollama: use a local Ollama server; off: keyword search only",
+      "default": "auto",
+      "options": ["auto", "ollama", "off"]
+    },
+    "log": {
+      "type": "boolean",
+      "title": "Event log",
+      "description": "Keep a local log of recalls and learning for evaluation (plasticity log, plasticity eval report)",
+      "default": true
+    }
+  }
+}

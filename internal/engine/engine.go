@@ -28,6 +28,7 @@ type Engine struct {
 	embOwned bool           // the engine created emb and must close it
 	injected bool           // emb was supplied by WithEmbedder
 	noEmbed  bool           // WithoutEmbeddings: lexical seeding only
+	noLog    bool           // WithoutLog: no event log
 
 	// Warnings collects non-fatal problems (e.g. an unreachable embedder)
 	// for the caller to report.
@@ -99,8 +100,19 @@ func (e *Engine) AddNode(n *model.Node) (*model.Node, error) {
 // AddNodes adds several nodes in one transaction (all or none), assigning
 // IDs and timestamps and embedding them if embeddings are enabled.
 func (e *Engine) AddNodes(nodes []*model.Node) error {
-	now := timestamp()
+	if err := prepareNodes(nodes); err != nil {
+		return err
+	}
 	vecs := make([]*nodeVector, len(nodes))
+	for i, n := range nodes {
+		vecs[i] = e.embedNode(context.Background(), n) // outside the write transaction
+	}
+	return e.insertNodes(nodes, vecs)
+}
+
+// prepareNodes assigns IDs and timestamps and validates.
+func prepareNodes(nodes []*model.Node) error {
+	now := timestamp()
 	for i, n := range nodes {
 		n.ID = ulid.MustNew(ulid.Timestamp(now), ulid.DefaultEntropy()).String()
 		n.CreatedAt, n.UpdatedAt = now, now
@@ -109,9 +121,12 @@ func (e *Engine) AddNodes(nodes []*model.Node) error {
 			return fmt.Errorf("node %d (%q): %w", i, n.Title, err)
 		}
 	}
-	for i, n := range nodes {
-		vecs[i] = e.embedNode(context.Background(), n) // outside the write transaction
-	}
+	return nil
+}
+
+// insertNodes stores prepared nodes and their (optional) vectors in one
+// transaction.
+func (e *Engine) insertNodes(nodes []*model.Node, vecs []*nodeVector) error {
 	return e.st.Write(func(tx *store.Tx) error {
 		tick, err := tx.Tick()
 		if err != nil {

@@ -1,0 +1,58 @@
+#!/bin/sh
+# plasticity launcher for the Claude Code plugin.
+#
+# Builds the Go binary from the plugin's sources on first use (and whenever the
+# plugin version or a source file changes) into $PLASTICITY_HOME/bin, then runs
+# it. Requires Go (https://go.dev/dl). Set PLASTICITY_NO_BUILD=1 to never build
+# (used by latency-sensitive hooks): if the binary is missing, exit quietly.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+home=${PLASTICITY_HOME:-$HOME/.plasticity}
+version=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" | head -n 1)
+bin="$home/bin/plasticity-${version:-dev}"
+
+stale() {
+	[ ! -x "$bin" ] && return 0
+	# Rebuild if any source is newer than the binary (development checkouts,
+	# or an update that kept the version number).
+	[ -n "$(find "$root/go.mod" "$root/go.sum" "$root/cmd" "$root/internal" -newer "$bin" -name '*.go' -o -newer "$bin" -name 'go.*' 2>/dev/null | head -n 1)" ]
+}
+
+build() {
+	if ! command -v go >/dev/null 2>&1; then
+		echo "plasticity: Go >= 1.27 is required to build the memory engine (https://go.dev/dl)" >&2
+		exit 127
+	fi
+	mkdir -p "$home/bin"
+	lock="$home/bin/.build.lock"
+	# mkdir is atomic: one builder at a time; others wait (up to ~10 min).
+	waited=0
+	until mkdir "$lock" 2>/dev/null; do
+		if [ -n "$(find "$lock" -maxdepth 0 -mmin +15 2>/dev/null)" ]; then
+			rmdir "$lock" 2>/dev/null || true # stale lock from a killed build
+			continue
+		fi
+		[ "$waited" -ge 600 ] && { echo "plasticity: timed out waiting for another build" >&2; exit 1; }
+		sleep 1
+		waited=$((waited + 1))
+	done
+	trap 'rmdir "$lock" 2>/dev/null || true' EXIT INT TERM
+	if stale; then
+		echo "plasticity: building $bin (first use takes a minute) ..." >&2
+		tmp="$bin.tmp.$$"
+		(cd "$root" && CGO_ENABLED=0 go build -trimpath -o "$tmp" ./cmd/plasticity)
+		mv -f "$tmp" "$bin"
+	fi
+	rmdir "$lock" 2>/dev/null || true
+	trap - EXIT INT TERM
+}
+
+if stale; then
+	if [ "${PLASTICITY_NO_BUILD:-}" = 1 ]; then
+		[ -x "$bin" ] || exit 0 # not built yet: the background setup hook builds it
+	else
+		build
+	fi
+fi
+exec "$bin" "$@"

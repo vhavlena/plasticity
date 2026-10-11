@@ -63,9 +63,26 @@ func (c *cli) json(v any, args ...string) {
 }
 
 func (c *cli) add(title, content string, extra ...string) string {
-	var n struct{ ID string }
-	c.json(&n, append([]string{"add", "--title", title, "--content", content}, extra...)...)
-	return n.ID
+	var r struct{ Node struct{ ID string } }
+	c.json(&r, append([]string{"add", "--title", title, "--content", content}, extra...)...)
+	if r.Node.ID == "" {
+		c.t.Fatalf("add %q inserted nothing", title)
+	}
+	return r.Node.ID
+}
+
+// hook runs a hook handler with the given input JSON and returns stdout.
+func (c *cli) hook(event string, input map[string]any) string {
+	c.t.Helper()
+	raw, _ := json.Marshal(input)
+	cmd := exec.Command(binary, "--db", c.db, "hook", event)
+	cmd.Stdin = strings.NewReader(string(raw))
+	cmd.Env = append(os.Environ(), "PLASTICITY_EMBEDDINGS=off")
+	out, err := cmd.Output()
+	if err != nil {
+		c.t.Fatalf("hook %s: %v", event, err)
+	}
+	return string(out)
 }
 
 type edgeView struct {
@@ -163,8 +180,9 @@ func TestStdinAndLinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var n struct{ ID, Type string }
-	_ = json.Unmarshal(out, &n)
+	var r struct{ Node struct{ ID, Type string } }
+	_ = json.Unmarshal(out, &r)
+	n := r.Node
 	if n.Type != "rationale" {
 		t.Fatalf("stdin node: %s", out)
 	}
@@ -297,11 +315,186 @@ func TestEvalCommands(t *testing.T) {
 	if err := json.Unmarshal(raw, &r); err != nil || len(r.Results) != 2 || len(r.Results[1].Passes) != 2 || r.Results[1].Passes[0].Queries != 15 {
 		t.Fatalf("json report: %v %s", err, raw)
 	}
-	// The hand-made scenario shipped with the repo must stay valid.
-	if out, err := c.run("eval", "run", "../../scenarios/plasticity-design.json", "--learn", "none", "--passes", "1"); err != nil {
-		t.Fatalf("plasticity-design scenario: %v\n%s", err, out)
+	// The hand-made scenario must stay valid (if present: scenarios/ may be untracked).
+	if _, err := os.Stat("../../scenarios/plasticity-design.json"); err == nil {
+		if out, err := c.run("eval", "run", "../../scenarios/plasticity-design.json", "--learn", "none", "--passes", "1"); err != nil {
+			t.Fatalf("plasticity-design scenario: %v\n%s", err, out)
+		}
 	}
 	if _, err := c.run("eval", "run", scen, "--learn", "bogus"); err == nil {
 		t.Fatal("unknown learning mode accepted")
+	}
+}
+
+func TestAddDuplicateAndLinkValidation(t *testing.T) {
+	c := newCLI(t)
+	c.add("Use SQLite WAL", "x")
+	var r struct {
+		Node      *struct{ ID string }
+		Duplicate *struct{ ID string } `json:"duplicate_of"`
+	}
+	c.json(&r, "add", "--title", "use sqlite  WAL", "-c", "y")
+	if r.Node != nil || r.Duplicate == nil {
+		t.Fatalf("duplicate not reported: %+v", r)
+	}
+	c.json(&r, "add", "--title", "use sqlite  WAL", "-c", "y", "--force")
+	if r.Node == nil {
+		t.Fatal("--force must insert")
+	}
+	if _, err := c.run("add", "--title", "Orphan", "--link", "nope:supports"); err == nil {
+		t.Fatal("bad --link target accepted")
+	}
+	var st struct{ Nodes int }
+	c.json(&st, "stats")
+	if st.Nodes != 2 {
+		t.Fatalf("a failed --link must insert nothing: %d nodes", st.Nodes)
+	}
+}
+
+// A whole Claude Code session driven through the hook handlers.
+func TestHookLifecycle(t *testing.T) {
+	c := newCLI(t)
+	sqlite := c.add("Use SQLite WAL for storage", "many processes read while one writes", "-r", "hooks are processes")
+	dir := t.TempDir()
+	tr := filepath.Join(dir, "t.jsonl")
+	var lines []string
+	for i := 0; i < 6; i++ {
+		lines = append(lines, `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"`+dir+`/main.go"}}]}}`)
+	}
+	os.WriteFile(tr, []byte(strings.Join(lines, "\n")), 0o644)
+	in := func(extra map[string]any) map[string]any {
+		m := map[string]any{"session_id": "S1", "cwd": dir, "transcript_path": tr}
+		for k, v := range extra {
+			m[k] = v
+		}
+		return m
+	}
+
+	var out struct {
+		Specific         struct{ HookEventName, AdditionalContext string } `json:"hookSpecificOutput"`
+		Decision, Reason string
+	}
+	json.Unmarshal([]byte(c.hook("session-start", in(map[string]any{"source": "startup"}))), &out)
+	if out.Specific.HookEventName != "SessionStart" || !strings.Contains(out.Specific.AdditionalContext, "S1") {
+		t.Fatalf("session-start: %+v", out)
+	}
+	json.Unmarshal([]byte(c.hook("prompt", in(map[string]any{"prompt": "why did we choose sqlite storage?"}))), &out)
+	if !strings.Contains(out.Specific.AdditionalContext, sqlite) {
+		t.Fatalf("prompt context: %+v", out)
+	}
+	if got := c.hook("prompt", in(map[string]any{"prompt": "ok thanks"})); got != "" {
+		t.Fatalf("trivial prompt produced output: %q", got)
+	}
+
+	out = struct {
+		Specific         struct{ HookEventName, AdditionalContext string } `json:"hookSpecificOutput"`
+		Decision, Reason string
+	}{}
+	json.Unmarshal([]byte(c.hook("stop", in(nil))), &out)
+	if out.Decision != "block" {
+		t.Fatalf("expected a reflection nudge: %+v", out)
+	}
+	if got := c.hook("stop", in(map[string]any{"stop_hook_active": true})); got != "" {
+		t.Fatalf("stop while active: %q", got)
+	}
+
+	// Claude follows the nudge: stores a decision and reports what it used.
+	var added struct {
+		Node         struct{ ID string }
+		ContextLinks int `json:"context_links"`
+	}
+	c.json(nil, "used", "--session", "S1", sqlite)
+	c.json(&added, "add", "-t", "decision", "--title", "Keep writes short", "-r", "avoid lock waits", "--session", "S1")
+	if added.ContextLinks != 1 {
+		t.Fatalf("new neuron not linked to the session context: %+v", added)
+	}
+	c.hook("session-end", in(map[string]any{"reason": "prompt_input_exit"}))
+
+	var evs []struct{ Kind string }
+	c.json(&evs, "log", "--session", "S1")
+	kinds := map[string]int{}
+	for _, e := range evs {
+		kinds[e.Kind]++
+	}
+	for _, k := range []string{"session_start", "prompt", "recall", "nudge", "used", "add", "episode"} {
+		if kinds[k] == 0 {
+			t.Errorf("no %s event: %v", k, kinds)
+		}
+	}
+	var r struct {
+		Hits []struct {
+			Node struct{ Type, Content string }
+		}
+	}
+	c.json(&r, "recall", "why", "did", "we", "choose", "sqlite", "storage", "--no-record")
+	foundEpisode := false
+	for _, h := range r.Hits {
+		if h.Node.Type == "episode" && strings.Contains(h.Node.Content, "main.go") {
+			foundEpisode = true
+		}
+	}
+	if !foundEpisode {
+		t.Fatalf("episode with edited files not recallable: %+v", r.Hits)
+	}
+	// Bad input never fails the hook (exit 0, message on stderr).
+	cmd := exec.Command(binary, "--db", c.db, "hook", "prompt")
+	cmd.Stdin = strings.NewReader("not json")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("hook must exit 0 on bad input: %v", err)
+	}
+}
+
+// The plugin's hooks must call existing hook subcommands, and every handler
+// must exit 0 even on minimal input.
+func TestPluginHooksAreWired(t *testing.T) {
+	raw, err := os.ReadFile("../../hooks/hooks.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		Hooks map[string][]struct {
+			Hooks []struct{ Type, Command string }
+		}
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	c := newCLI(t)
+	seen := 0
+	for event, groups := range cfg.Hooks {
+		for _, g := range groups {
+			for _, h := range g.Hooks {
+				i := strings.Index(h.Command, " hook ")
+				if h.Type != "command" || i < 0 || !strings.Contains(h.Command, "${CLAUDE_PLUGIN_ROOT}/bin/plasticity") {
+					t.Fatalf("%s: unexpected hook %+v", event, h)
+				}
+				name := strings.Fields(h.Command[i+len(" hook "):])[0]
+				cmd := exec.Command(binary, "--db", c.db, "hook", name)
+				cmd.Stdin = strings.NewReader(`{"session_id":"wired","cwd":"` + t.TempDir() + `","prompt":"is everything wired correctly?"}`)
+				cmd.Env = append(os.Environ(), "PLASTICITY_EMBEDDINGS=off", "PLASTICITY_HOME="+t.TempDir())
+				var stderr strings.Builder
+				cmd.Stderr = &stderr
+				if err := cmd.Run(); err != nil {
+					t.Fatalf("%s → hook %s: %v %s", event, name, err, stderr.String())
+				}
+				if strings.Contains(stderr.String(), "unknown command") {
+					t.Fatalf("%s → hook %s does not exist: %s", event, name, stderr.String())
+				}
+				seen++
+			}
+		}
+	}
+	if seen < 5 {
+		t.Fatalf("only %d hooks wired", seen)
+	}
+	for _, f := range []string{"../../.claude-plugin/plugin.json", "../../.claude-plugin/marketplace.json"} {
+		raw, err := os.ReadFile(f)
+		var v map[string]any
+		if err != nil || json.Unmarshal(raw, &v) != nil || v["name"] != "plasticity" {
+			t.Fatalf("%s: invalid manifest (%v)", f, err)
+		}
+	}
+	if fi, err := os.Stat("../../bin/plasticity"); err != nil || fi.Mode()&0o111 == 0 {
+		t.Fatal("bin/plasticity shim missing or not executable")
 	}
 }

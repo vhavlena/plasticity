@@ -12,13 +12,24 @@ var wordRE = regexp.MustCompile(`[\p{L}\p{N}]+`)
 
 var stopwords = map[string]bool{}
 
+// The NLTK English stopword list plus conversational filler common in
+// prompts.
 func init() {
-	for _, w := range strings.Fields(`a also an and are as at be but by can could do does for from has have how
-		i if in into is it its just me my need not of on or our please should so that the their them
-		then there these this to us want was we what when where which who why will with would you your`) {
+	for _, w := range strings.Fields(`i me my myself we our ours ourselves you your yours yourself yourselves
+		he him his himself she her hers herself it its itself they them their theirs themselves what which
+		who whom this that these those am is are was were be been being have has had having do does did
+		doing a an the and but if or because as until while of at by for with about against between into
+		through during before after above below to from up down in out on off over under again further
+		then once here there when where why how all any both each few more most other some such no nor not
+		only own same so than too very s t can will just don should now d ll m o re ve y ain aren couldn
+		didn doesn hadn hasn haven isn ma mightn mustn needn shan shouldn wasn weren won wouldn
+		also could would might must shall may please want need let lets get got ok okay yes thanks thank`) {
 		stopwords[w] = true
 	}
 }
+
+// IsStopword reports whether w (lower-case) is ignored by search.
+func IsStopword(w string) bool { return stopwords[w] }
 
 // queryTerms extracts the distinct searchable words of a query: lowercase,
 // without stopwords and one-letter words.
@@ -78,11 +89,14 @@ func (s *seeding) confidence() float64 { return math.Max(s.lexical, s.semantic) 
 // lexicalStrengths calibrates BM25 hits:
 //
 //	L_i = (bm25_i / bm25_best) · C
-//	C   = Σ_{t matched by some hit} idf_t / (Σ_{t known} idf_t + w_abs · Σ_{t unknown} idf_t)
+//	C   = Σ_{t matched by some hit} idf_t / (Σ_{t known} idf_t + w_abs · Σ_{t unknown} idf(N, 1))
 //
 // C (query confidence) is the IDF-weighted share of the query that the hits
 // explain. Words that occur nowhere in the graph count against it with weight
-// w_abs. The relative BM25 factor ranks hits within one query; C makes the
+// w_abs, each weighted like a word occurring once: an unseen word is not more
+// informative than the rarest known one. (Using idf(N, 0) would let a few
+// filler words of a conversational prompt swamp the matched terms, especially
+// in small graphs.) The relative BM25 factor ranks hits within one query; C makes the
 // strength comparable across queries, so a query whose best match covers only
 // an unimportant fraction of it produces weak seeds instead of full-strength
 // ones.
@@ -105,7 +119,7 @@ func (e *Engine) lexicalStrengths(tx *store.Tx, terms []string, hits []store.Sea
 		if err != nil {
 			return nil, err
 		}
-		ti := TermInfo{Term: t, DocFreq: df, IDF: idf(n, df)}
+		ti := TermInfo{Term: t, DocFreq: df, IDF: idf(n, max(df, 1))}
 		if df == 0 {
 			total += e.P.AbsentTermWeight * ti.IDF
 		} else {

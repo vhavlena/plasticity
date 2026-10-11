@@ -1,0 +1,19 @@
+name: test
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: shim builds and runs
+        run: PLASTICITY_HOME="$RUNNER_TEMP/plasticity" ./bin/plasticity --db "$RUNNER_TEMP/g.db" stats

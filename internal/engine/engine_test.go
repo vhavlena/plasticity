@@ -408,7 +408,8 @@ func TestPPRRerankAndExport(t *testing.T) {
 func TestQueryConfidenceCalibratesSeeds(t *testing.T) {
 	f := newFixture(t)
 	strong := f.recall("spreading activation", "")
-	weak := f.recall("kubernetes deploy rollout spreading", "")
+	// 1 matched term, 4 unknown: C = 1 / (1 + 0.5·4) ≈ 0.33 (≥ seed 0.25, < learn 0.4)
+	weak := f.recall("kubernetes canary deploy rollout spreading", "")
 	if strong.Confidence != 1 || len(strong.Hits) == 0 {
 		t.Fatalf("fully matched query: %+v", strong)
 	}
@@ -424,14 +425,15 @@ func TestQueryConfidenceCalibratesSeeds(t *testing.T) {
 			unmatched++
 		}
 	}
-	if unmatched != 3 {
+	if unmatched != 4 {
 		t.Fatalf("term report: %+v", weak.Terms)
 	}
 }
 
 func TestNoGoodMatchRecallsNothing(t *testing.T) {
 	f := newFixture(t)
-	r := f.recall("terraform helm chart ingress certificate rotation pasta", "s")
+	// 1 matched term, 8 unknown: C = 1 / (1 + 0.5·8) = 0.2 < 0.25
+	r := f.recall("terraform helm chart ingress certificate rotation kubernetes canary pasta", "s")
 	if r.Seeds != 0 || len(r.Hits) != 0 || r.RecallID != "" {
 		t.Fatalf("a single weak term among many unknown ones must not seed: %+v", r)
 	}
@@ -452,7 +454,8 @@ func TestMultiTopicQueryKeepsAllSeeds(t *testing.T) {
 func TestLowConfidenceRecallDoesNotLearn(t *testing.T) {
 	f := newFixture(t)
 	for i := 0; i < 3; i++ {
-		r := f.recall("kubernetes canary deploy rollout spreading hebbian", "s")
+		// 2 matched, 7 unknown: C = 2 / (2 + 0.5·7) ≈ 0.36 < 0.4
+		r := f.recall("kubernetes canary deploy rollout helm ingress terraform spreading hebbian", "s")
 		if r.RecallID != "" || r.TraceSkipped == "" || len(r.Hits) < 2 {
 			t.Fatalf("low-confidence recall must not store a trace: %+v", r)
 		}
