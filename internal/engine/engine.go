@@ -28,6 +28,11 @@ type Engine struct {
 	embOwned bool           // the engine created emb and must close it
 	injected bool           // emb was supplied by WithEmbedder
 	noEmbed  bool           // WithoutEmbeddings: lexical seeding only
+	noLog    bool           // WithoutLog: no event log
+
+	// afterEpisode, if set, runs in EndSession right after the episode is
+	// stored (tests: simulates the hook being killed at that point).
+	afterEpisode func() error
 
 	// Warnings collects non-fatal problems (e.g. an unreachable embedder)
 	// for the caller to report.
@@ -99,8 +104,19 @@ func (e *Engine) AddNode(n *model.Node) (*model.Node, error) {
 // AddNodes adds several nodes in one transaction (all or none), assigning
 // IDs and timestamps and embedding them if embeddings are enabled.
 func (e *Engine) AddNodes(nodes []*model.Node) error {
-	now := timestamp()
+	if err := prepareNodes(nodes); err != nil {
+		return err
+	}
 	vecs := make([]*nodeVector, len(nodes))
+	for i, n := range nodes {
+		vecs[i] = e.embedNode(context.Background(), n) // outside the write transaction
+	}
+	return e.insertNodes(nodes, vecs, nil)
+}
+
+// prepareNodes assigns IDs and timestamps and validates.
+func prepareNodes(nodes []*model.Node) error {
+	now := timestamp()
 	for i, n := range nodes {
 		n.ID = ulid.MustNew(ulid.Timestamp(now), ulid.DefaultEntropy()).String()
 		n.CreatedAt, n.UpdatedAt = now, now
@@ -109,9 +125,12 @@ func (e *Engine) AddNodes(nodes []*model.Node) error {
 			return fmt.Errorf("node %d (%q): %w", i, n.Title, err)
 		}
 	}
-	for i, n := range nodes {
-		vecs[i] = e.embedNode(context.Background(), n) // outside the write transaction
-	}
+	return nil
+}
+
+// insertNodes stores prepared nodes and their (optional) vectors in one
+// transaction, together with then (if not nil).
+func (e *Engine) insertNodes(nodes []*model.Node, vecs []*nodeVector, then func(*store.Tx) error) error {
 	return e.st.Write(func(tx *store.Tx) error {
 		tick, err := tx.Tick()
 		if err != nil {
@@ -127,6 +146,9 @@ func (e *Engine) AddNodes(nodes []*model.Node) error {
 					return err
 				}
 			}
+		}
+		if then != nil {
+			return then(tx)
 		}
 		return nil
 	})
@@ -392,8 +414,18 @@ func (e *Engine) SetParam(key, value string) error {
 	if err := e.st.Write(func(tx *store.Tx) error { return tx.SetParam(key, value) }); err != nil {
 		return err
 	}
+	old := e.P.ToMap()[key]
 	e.P = p
+	e.logChange(key, old, p.ToMap()[key])
 	return nil
+}
+
+// logChange logs a change of a parameter or of the embedder, so that usage
+// reports can compare the periods before and after it.
+func (e *Engine) logChange(key, old, new string) {
+	if old != new {
+		e.Log("", EventParam, map[string]string{"key": key, "old": old, "new": new})
+	}
 }
 
 // ResetParam removes an override, restoring the default.
@@ -401,14 +433,19 @@ func (e *Engine) ResetParam(key string) error {
 	if _, ok := e.P.ToMap()[key]; !ok {
 		return fmt.Errorf("unknown parameter %q", key)
 	}
-	return e.st.Write(func(tx *store.Tx) error {
+	old := e.P.ToMap()[key]
+	if err := e.st.Write(func(tx *store.Tx) error {
 		if err := tx.ResetParam(key); err != nil {
 			return err
 		}
 		p, err := tx.LoadParams()
 		e.P = p
 		return err
-	})
+	}); err != nil {
+		return err
+	}
+	e.logChange(key, old, e.P.ToMap()[key])
+	return nil
 }
 
 // Stats returns graph statistics.

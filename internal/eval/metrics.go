@@ -2,6 +2,8 @@ package eval
 
 import (
 	"math"
+
+	"github.com/vhavlena/plasticity/internal/engine"
 	"regexp"
 	"sort"
 	"strings"
@@ -78,20 +80,10 @@ func stem(w string) string {
 	return w
 }
 
-var evalStopwords = map[string]bool{}
-
-func init() {
-	for _, w := range strings.Fields(`a also an and are as at be but by can could do does for from has have how i if in
-		into is it its just me my need not of on or our please should so that the their them then there these this to
-		us want was we what when where which who why will with would you your`) {
-		evalStopwords[w] = true
-	}
-}
-
 func terms(text string) map[string]bool {
 	out := map[string]bool{}
 	for _, w := range wordRE.FindAllString(strings.ToLower(text), -1) {
-		if len(w) >= 2 && !evalStopwords[w] {
+		if len(w) >= 2 && !engine.IsStopword(w) {
 			out[stem(w)] = true
 		}
 	}

@@ -1,8 +1,6 @@
 package eval
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -306,14 +304,8 @@ func graphHealth(e *engine.Engine, s *Scenario, keyOf map[string]string) (GraphH
 		return g, err
 	}
 	g.Nodes, g.Dormant, g.PendingTraces = st.Nodes, st.DormantNodes, st.PendingTraces
-	var buf bytes.Buffer
-	if err := e.Export(&buf, "json"); err != nil {
-		return g, err
-	}
-	var exp struct {
-		Edges []engine.ExportEdge `json:"edges"`
-	}
-	if err := json.Unmarshal(buf.Bytes(), &exp); err != nil {
+	_, edges, err := e.Snapshot()
+	if err != nil {
 		return g, err
 	}
 	preloaded := map[[2]string]bool{}
@@ -334,7 +326,7 @@ func graphHealth(e *engine.Engine, s *Scenario, keyOf map[string]string) (GraphH
 	}
 	degree := map[string]int{}
 	sum := 0.0
-	for _, ed := range exp.Edges {
+	for _, ed := range edges {
 		if ed.Kind.Typed() {
 			g.Typed++
 			continue

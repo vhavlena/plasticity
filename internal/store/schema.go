@@ -108,4 +108,40 @@ CREATE TABLE config (
 	value TEXT NOT NULL
 );
 `,
+	`
+-- Claude Code sessions using the memory (plugin hooks).
+CREATE TABLE sessions (
+	id           TEXT PRIMARY KEY,
+	project      TEXT NOT NULL DEFAULT '',
+	transcript   TEXT NOT NULL DEFAULT '',
+	first_prompt TEXT NOT NULL DEFAULT '',
+	prompts      INTEGER NOT NULL DEFAULT 0,
+	nudged       INTEGER NOT NULL DEFAULT 0,
+	episode_id   TEXT NOT NULL DEFAULT '',
+	started_at   INTEGER NOT NULL,
+	last_seen    INTEGER NOT NULL,
+	ended_at     INTEGER NOT NULL DEFAULT 0
+);
+
+-- Neurons a session used (reported by Claude) or created, in order; they
+-- give new neurons and episodes their context links.
+CREATE TABLE session_nodes (
+	session TEXT NOT NULL,
+	node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+	role    TEXT NOT NULL,
+	ts      INTEGER NOT NULL,
+	PRIMARY KEY (session, node_id, role)
+);
+
+-- Append-only event log for evaluating real sessions.
+CREATE TABLE events (
+	id      INTEGER PRIMARY KEY,
+	ts      INTEGER NOT NULL,
+	session TEXT NOT NULL DEFAULT '',
+	kind    TEXT NOT NULL,
+	payload TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX events_session ON events(session, id);
+CREATE INDEX events_kind ON events(kind, id);
+`,
 }

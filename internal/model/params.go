@@ -115,6 +115,22 @@ type Params struct {
 	BM25Rationale float64 `json:"bm25_rationale"`
 	BM25Tags      float64 `json:"bm25_tags"`
 
+	// --- Sessions (Claude Code plugin) ---
+
+	// ContextLinkWeight is the weight of the associative links a new neuron
+	// gets to the neurons its session used or created before it.
+	ContextLinkWeight float64 `json:"context_link_weight"`
+	// ContextLinks caps how many recent session neurons a new one links to.
+	ContextLinks int `json:"context_links"`
+	// DedupeCos: adding a neuron whose embedding has at least this cosine to
+	// an existing one returns the existing one instead (unless forced).
+	DedupeCos float64 `json:"dedupe_cos"`
+	// NudgeMinToolCalls: the Stop hook asks Claude to store or report
+	// memories only after at least this many tool calls in the session.
+	NudgeMinToolCalls int `json:"nudge_min_tool_calls"`
+	// ConsolidateEverySessions runs consolidation after every n ended sessions.
+	ConsolidateEverySessions int `json:"consolidate_every_sessions"`
+
 	// --- PageRank rerank ---
 
 	PPRRestart float64 `json:"ppr_restart"`
@@ -148,7 +164,7 @@ func DefaultParams() Params {
 
 		SeedLimit:        10,
 		AbsentTermWeight: 0.5,
-		MinSeedStrength:  0.2,
+		MinSeedStrength:  0.25,
 		VectorCosLow:     0.25,
 		VectorCosHigh:    0.6,
 		EmbedMaxWords:    200,
@@ -170,6 +186,12 @@ func DefaultParams() Params {
 		BM25Rationale: 1,
 		BM25Tags:      3,
 
+		ContextLinkWeight:        0.3,
+		ContextLinks:             10,
+		DedupeCos:                0.9,
+		NudgeMinToolCalls:        5,
+		ConsolidateEverySessions: 10,
+
 		PPRRestart: 0.15,
 	}
 }
@@ -182,6 +204,7 @@ func (p Params) Validate() error {
 		"prune_threshold": p.PruneThreshold, "hop_decay": p.HopDecay,
 		"firing_threshold": p.FiringThreshold, "ppr_restart": p.PPRRestart,
 		"absent_term_weight": p.AbsentTermWeight, "min_seed_strength": p.MinSeedStrength,
+		"context_link_weight": p.ContextLinkWeight, "dedupe_cos": p.DedupeCos,
 		"learn_min_confidence": p.LearnMinConfidence, "learn_min_activation": p.LearnMinActivation,
 		"vector_cos_low": p.VectorCosLow, "vector_cos_high": p.VectorCosHigh,
 	}
@@ -207,7 +230,8 @@ func (p Params) Validate() error {
 		return fmt.Errorf("firing_threshold must be > 0")
 	}
 	if p.ReinforceTopK < 2 || p.SeedLimit < 1 || p.MaxNodes < 1 || p.MaxHops < 1 ||
-		p.EdgesPerNode < 1 || p.ResultLimit < 1 || p.MaxAccessRecords < 1 || p.TraceRetention < 1 || p.EmbedMaxWords < 1 {
+		p.EdgesPerNode < 1 || p.ResultLimit < 1 || p.MaxAccessRecords < 1 || p.TraceRetention < 1 || p.EmbedMaxWords < 1 ||
+		p.ContextLinks < 0 || p.NudgeMinToolCalls < 0 || p.ConsolidateEverySessions < 1 {
 		return fmt.Errorf("integer limits must be positive (reinforce_top_k ≥ 2)")
 	}
 	return nil

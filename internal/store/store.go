@@ -139,6 +139,27 @@ func scanNode(r scanner, extra ...any) (*model.Node, error) {
 	return &n, nil
 }
 
+// FindTitle returns the first node, shortest title first, whose title
+// matches the LIKE pattern (escape character \) and satisfies same; nil if
+// none does.
+func (t *Tx) FindTitle(pattern string, same func(title string) bool) (*model.Node, error) {
+	rows, err := t.tx.Query(`SELECT `+nodeCols+` FROM nodes WHERE title LIKE ? ESCAPE '\' ORDER BY length(title)`, pattern)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		n, err := scanNode(rows)
+		if err != nil {
+			return nil, err
+		}
+		if same(n.Title) {
+			return n, nil
+		}
+	}
+	return nil, rows.Err()
+}
+
 // InsertNode adds a new node.
 func (t *Tx) InsertNode(n *model.Node) error {
 	_, err := t.tx.Exec(`INSERT INTO nodes (`+nodeCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
@@ -771,4 +792,211 @@ func (t *Tx) SetConfig(key, value string) error {
 	}
 	_, err := t.tx.Exec(`INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, value)
 	return err
+}
+
+// ---------------------------------------------------------------- sessions
+
+// Session is a Claude Code session using the memory.
+type Session struct {
+	ID          string    `json:"id"`
+	Project     string    `json:"project"`
+	Transcript  string    `json:"transcript,omitempty"`
+	FirstPrompt string    `json:"first_prompt"`
+	Prompts     int       `json:"prompts"`
+	Nudged      bool      `json:"nudged"`
+	EpisodeID   string    `json:"episode_id,omitempty"`
+	StartedAt   time.Time `json:"started_at"`
+	LastSeen    time.Time `json:"last_seen"`
+	EndedAt     time.Time `json:"ended_at,omitzero"`
+}
+
+// TouchSession creates the session or updates its last-seen time (and
+// project, if it was unknown). Activity reopens an ended session: a session
+// closed as abandoned may be resumed.
+func (t *Tx) TouchSession(id, project string, at time.Time) error {
+	_, err := t.tx.Exec(`INSERT INTO sessions (id, project, started_at, last_seen) VALUES (?, ?, ?, ?)
+		ON CONFLICT (id) DO UPDATE SET last_seen = excluded.last_seen, ended_at = 0,
+		project = CASE WHEN sessions.project = '' THEN excluded.project ELSE sessions.project END`,
+		id, project, ts(at), ts(at))
+	return err
+}
+
+// SetTranscript records the session's transcript path.
+func (t *Tx) SetTranscript(id, path string) error {
+	_, err := t.tx.Exec(`UPDATE sessions SET transcript = ? WHERE id = ? AND ? <> ''`, path, id, path)
+	return err
+}
+
+// OpenSessionsBefore returns sessions that have not ended and were last seen
+// before the given time (abandoned sessions), oldest first.
+func (t *Tx) OpenSessionsBefore(before time.Time, limit int) ([]string, error) {
+	rows, err := t.tx.Query(`SELECT id FROM sessions WHERE ended_at = 0 AND last_seen < ? ORDER BY last_seen LIMIT ?`, ts(before), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// GetSession returns a session or nil if unknown.
+func (t *Tx) GetSession(id string) (*Session, error) {
+	var s Session
+	var nudged int
+	var started, seen, ended int64
+	err := t.tx.QueryRow(`SELECT id, project, transcript, first_prompt, prompts, nudged, episode_id, started_at, last_seen, ended_at
+		FROM sessions WHERE id = ?`, id).Scan(&s.ID, &s.Project, &s.Transcript, &s.FirstPrompt, &s.Prompts, &nudged, &s.EpisodeID, &started, &seen, &ended)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	s.Nudged = nudged != 0
+	s.StartedAt, s.LastSeen = fromTS(started), fromTS(seen)
+	if ended != 0 {
+		s.EndedAt = fromTS(ended)
+	}
+	return &s, nil
+}
+
+// CountPrompt records a user prompt of the session (the first one is kept as
+// the session's title).
+func (t *Tx) CountPrompt(id, prompt string) error {
+	_, err := t.tx.Exec(`UPDATE sessions SET prompts = prompts + 1,
+		first_prompt = CASE WHEN first_prompt = '' THEN ? ELSE first_prompt END WHERE id = ?`, prompt, id)
+	return err
+}
+
+// SetNudged marks that the session received the reflection nudge.
+func (t *Tx) SetNudged(id string) error {
+	_, err := t.tx.Exec(`UPDATE sessions SET nudged = 1 WHERE id = ?`, id)
+	return err
+}
+
+// EndSession records the session's end and its episode neuron.
+func (t *Tx) EndSession(id, episodeID string, at time.Time) error {
+	_, err := t.tx.Exec(`UPDATE sessions SET ended_at = ?, episode_id = ? WHERE id = ?`, ts(at), episodeID, id)
+	return err
+}
+
+// SetSessionEpisode records the session's episode neuron, leaving the
+// session open.
+func (t *Tx) SetSessionEpisode(id, episodeID string) error {
+	_, err := t.tx.Exec(`UPDATE sessions SET episode_id = ? WHERE id = ?`, episodeID, id)
+	return err
+}
+
+// CountEndedSessions returns how many sessions have ended.
+func (t *Tx) CountEndedSessions() (int, error) {
+	var n int
+	err := t.tx.QueryRow(`SELECT count(*) FROM sessions WHERE ended_at <> 0`).Scan(&n)
+	return n, err
+}
+
+// AddSessionNodes records neurons a session used or created.
+func (t *Tx) AddSessionNodes(session, role string, ids []string, at time.Time) error {
+	for i, id := range ids {
+		if _, err := t.tx.Exec(`INSERT INTO session_nodes (session, node_id, role, ts) VALUES (?, ?, ?, ?)
+			ON CONFLICT DO NOTHING`, session, id, role, ts(at)+int64(i)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SessionNodes returns the neurons a session recorded under the given roles,
+// oldest first, without duplicates.
+func (t *Tx) SessionNodes(session string, roles ...string) ([]string, error) {
+	rows, err := t.tx.Query(`SELECT node_id FROM session_nodes WHERE session = ? AND role IN (`+placeholders(len(roles))+`)
+		GROUP BY node_id ORDER BY min(ts)`, append([]any{session}, anys(roles)...)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// ---------------------------------------------------------------- events
+
+// Event is one entry of the event log.
+type Event struct {
+	ID      int64           `json:"id"`
+	At      time.Time       `json:"ts"`
+	Session string          `json:"session,omitempty"`
+	Kind    string          `json:"kind"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+// LogEvent appends an event; payload must be a JSON document.
+func (t *Tx) LogEvent(at time.Time, session, kind string, payload []byte) error {
+	if len(payload) == 0 {
+		payload = []byte("{}")
+	}
+	_, err := t.tx.Exec(`INSERT INTO events (ts, session, kind, payload) VALUES (?, ?, ?, ?)`, ts(at), session, kind, string(payload))
+	return err
+}
+
+// EventFilter selects events; zero fields do not filter.
+type EventFilter struct {
+	Session string
+	Kind    string
+	Since   time.Time
+	AfterID int64
+	Limit   int
+}
+
+// Events returns matching events, oldest first.
+func (t *Tx) Events(f EventFilter) ([]Event, error) {
+	q := `SELECT id, ts, session, kind, payload FROM events WHERE id > ?`
+	args := []any{f.AfterID}
+	if f.Session != "" {
+		q += ` AND session = ?`
+		args = append(args, f.Session)
+	}
+	if f.Kind != "" {
+		q += ` AND kind = ?`
+		args = append(args, f.Kind)
+	}
+	if !f.Since.IsZero() {
+		q += ` AND ts >= ?`
+		args = append(args, ts(f.Since))
+	}
+	q += ` ORDER BY id`
+	if f.Limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, f.Limit)
+	}
+	rows, err := t.tx.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Event
+	for rows.Next() {
+		var e Event
+		var at int64
+		var payload string
+		if err := rows.Scan(&e.ID, &at, &e.Session, &e.Kind, &payload); err != nil {
+			return nil, err
+		}
+		e.At, e.Payload = fromTS(at), json.RawMessage(payload)
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
