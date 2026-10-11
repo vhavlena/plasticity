@@ -17,19 +17,32 @@ const (
 	retryAfter = 24 * time.Hour // after a failed setup, retry at most daily
 )
 
-// Setup runs in the background (async SessionStart hook): it enables
-// embeddings on first use (downloading the model) and indexes neurons that
-// lack vectors. A lock file in home prevents concurrent setups; after a
-// failure it waits retryAfter before trying again. It returns a short status.
+// Setup runs in the background (async SessionStart hook): it applies the
+// embeddings option and indexes neurons that lack vectors. "off" disables a
+// configured embedder; "auto" enables the local model on first use (and keeps
+// any embedder configured by hand); an explicit provider such as "ollama"
+// replaces an embedder of another provider. A lock file in home prevents
+// concurrent setups; after a failure it waits retryAfter before trying
+// again. It returns a short status.
 func Setup(ctx context.Context, e *engine.Engine, cfg Config, home string) (string, error) {
-	if cfg.Embeddings == "off" {
-		return "embeddings disabled", nil
-	}
 	st, err := e.EmbedStatus()
 	if err != nil {
 		return "", err
 	}
-	if st.Config != nil { // already enabled: only fill gaps
+	if cfg.Embeddings == "off" {
+		if st.Config == nil {
+			return "embeddings disabled", nil
+		}
+		if err := e.DisableEmbedding(); err != nil {
+			return "", err
+		}
+		return "embeddings turned off", nil
+	}
+	provider := cfg.Embeddings // "" = no preference
+	if provider == "auto" {
+		provider = ""
+	}
+	if st.Config != nil && (provider == "" || st.Config.Provider == provider) { // enabled: only fill gaps
 		if st.Missing == 0 {
 			return "up to date", nil
 		}
@@ -54,8 +67,7 @@ func Setup(ctx context.Context, e *engine.Engine, cfg Config, home string) (stri
 	}
 	defer release()
 
-	provider := cfg.Embeddings
-	if provider == "auto" || provider == "" {
+	if provider == "" {
 		provider = embed.ProviderHugot
 	}
 	rep, err := e.EnableEmbedding(ctx, embed.Config{Provider: provider})

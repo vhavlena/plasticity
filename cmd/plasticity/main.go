@@ -16,6 +16,7 @@ import (
 
 	"github.com/vhavlena/plasticity/internal/embed"
 	"github.com/vhavlena/plasticity/internal/engine"
+	"github.com/vhavlena/plasticity/internal/hooks"
 	"github.com/vhavlena/plasticity/internal/model"
 	"github.com/vhavlena/plasticity/internal/paths"
 	"github.com/vhavlena/plasticity/internal/store"
@@ -25,6 +26,7 @@ type app struct {
 	dbPath  string
 	pretty  bool
 	noEmbed bool
+	noLog   bool
 	out     io.Writer
 	in      io.Reader
 }
@@ -47,10 +49,14 @@ func defaultDB() string {
 }
 
 func (a *app) open() (*engine.Engine, error) {
+	var opts []engine.Option
 	if a.noEmbed {
-		return engine.Open(a.dbPath, engine.WithoutEmbeddings())
+		opts = append(opts, engine.WithoutEmbeddings())
 	}
-	return engine.Open(a.dbPath)
+	if a.noLog || !hooks.ConfigFromEnv().Log {
+		opts = append(opts, engine.WithoutLog())
+	}
+	return engine.Open(a.dbPath, opts...)
 }
 
 // with opens the engine, runs fn and prints its result as JSON on stdout.
@@ -91,6 +97,7 @@ func newRoot(out io.Writer, in io.Reader) *cobra.Command {
 	root.PersistentFlags().StringVar(&a.dbPath, "db", defaultDB(), "graph database file (env PLASTICITY_DB; default by scope: $PLASTICITY_HOME/graph.db, or per project with PLASTICITY_SCOPE=project)")
 	root.PersistentFlags().BoolVar(&a.pretty, "pretty", false, "indent JSON output")
 	root.PersistentFlags().BoolVar(&a.noEmbed, "no-embed", false, "ignore embeddings: lexical seeding only (for comparisons)")
+	root.PersistentFlags().BoolVar(&a.noLog, "no-log", false, "do not write the event log (env PLASTICITY_LOG=false)")
 
 	root.AddCommand(
 		a.initCmd(), a.addCmd(), a.usedCmd(), a.noteCmd(), a.logCmd(), a.hookCmd(), a.getCmd(), a.updateCmd(), a.deleteCmd(),

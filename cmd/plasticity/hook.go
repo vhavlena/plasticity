@@ -49,6 +49,11 @@ func (a *app) hookCmd() *cobra.Command {
 			return nil, err // SessionEnd output is not shown to Claude
 		}),
 		handler("setup", func(e *engine.Engine, _ hooks.Input, _ string, cfg hooks.Config) (any, error) {
+			if n, err := hooks.CloseAbandoned(e, cfg, 3); err != nil {
+				fmt.Fprintln(os.Stderr, "plasticity setup: closing abandoned sessions:", err)
+			} else if n > 0 {
+				fmt.Fprintf(os.Stderr, "plasticity setup: closed %d abandoned sessions\n", n)
+			}
 			status, err := hooks.Setup(context.Background(), e, cfg, paths.Home())
 			if err == nil {
 				fmt.Fprintln(os.Stderr, "plasticity setup:", status)

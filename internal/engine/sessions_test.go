@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -164,6 +165,41 @@ func TestEndSessionKilledAfterEpisode(t *testing.T) {
 	}
 	if st, _ := f.e.Stats(); eps != 1 || st.Nodes != len(f.ids)+1 {
 		t.Fatalf("episodes: %d recalled, %d nodes for %d fixture nodes", eps, st.Nodes, len(f.ids))
+	}
+}
+
+func TestAddDetectsSameTitleAmongManyMatches(t *testing.T) {
+	f := newFixture(t)
+	add := func(title, content string) *AddResult {
+		t.Helper()
+		r, err := f.e.AddNodeChecked(&model.Node{Type: model.TypeFact, Title: title, Content: content}, AddOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	orig := add("SQLite", "the database we use").Node
+	for i := 0; i < 8; i++ { // outrank the short title on keywords
+		add(fmt.Sprintf("SQLite note %d", i), strings.Repeat("sqlite ", 30))
+	}
+	for _, title := range []string{"SQLite", "  sqlite ", "Do not do this", "100%_done", "Čeština v titulku"} {
+		first := add(title, "first")
+		if title == "SQLite" || title == "  sqlite " {
+			if first.Duplicate == nil || first.Duplicate.ID != orig.ID {
+				t.Fatalf("%q: duplicate of an existing title not caught: %+v", title, first)
+			}
+			continue
+		}
+		if first.Node == nil {
+			t.Fatalf("%q: new title rejected: %+v", title, first)
+		}
+		if again := add(strings.ToUpper(title), "second"); again.Duplicate == nil || again.Duplicate.ID != first.Node.ID {
+			t.Fatalf("%q: duplicate not caught: %+v", title, again)
+		}
+	}
+	// LIKE wildcards in a title are literal.
+	if r := add("100xxdone", "x"); r.Node == nil {
+		t.Fatalf("wildcard title matched another: %+v", r)
 	}
 }
 

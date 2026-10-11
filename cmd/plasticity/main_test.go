@@ -568,3 +568,28 @@ func TestNotesAndChangePeriods(t *testing.T) {
 		t.Fatalf("text report: %v\n%s", err, out)
 	}
 }
+
+func TestNoLog(t *testing.T) {
+	events := func(c *cli) int {
+		var evs []json.RawMessage
+		c.json(&evs, "log", "--limit", "100")
+		return len(evs)
+	}
+	c := newCLI(t)
+	c.add("Logged", "x", "--session", "S")
+	if events(c) == 0 {
+		t.Fatal("add --session logged nothing")
+	}
+	c = newCLI(t)
+	c.add("Not logged", "x", "--session", "S", "--no-log")
+	c.json(nil, "recall", "not logged", "--session", "S", "--no-log")
+	if n := events(c); n != 0 {
+		t.Fatalf("--no-log: %d events", n)
+	}
+	t.Setenv("PLASTICITY_LOG", "false") // inherited by the child processes
+	c = newCLI(t)
+	c.add("Not logged", "x", "--session", "S")
+	if n := events(c); n != 0 {
+		t.Fatalf("PLASTICITY_LOG=false: %d events", n)
+	}
+}

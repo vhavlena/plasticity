@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"github.com/vhavlena/plasticity/internal/engine"
 	"github.com/vhavlena/plasticity/internal/model"
 	"github.com/vhavlena/plasticity/internal/store"
+
+	_ "modernc.org/sqlite"
 )
 
 func newEngine(t *testing.T) *engine.Engine {
@@ -124,7 +127,7 @@ func TestFormatMemoriesBudget(t *testing.T) {
 
 func TestStopNudge(t *testing.T) {
 	e := newEngine(t)
-	cfg := Config{Reflect: true, DB: "/h/graph.db"}
+	cfg := Config{Reflect: true, Log: true, DB: "/h/graph.db"}
 	e.StartSession("S", "", "startup")
 	few := transcript(t, [2]string{"Read", "a.go"})
 	if out, _ := Stop(e, Input{SessionID: "S", TranscriptPath: few}, cfg); out != nil {
@@ -141,6 +144,9 @@ func TestStopNudge(t *testing.T) {
 	out, err := Stop(e, Input{SessionID: "S", TranscriptPath: many}, cfg)
 	if err != nil || out == nil || out.Decision != "block" || !strings.Contains(out.Reason, "plasticity --db '/h/graph.db' add") || !strings.Contains(out.Reason, "--session S") {
 		t.Fatalf("expected nudge: %v %+v", err, out)
+	}
+	if !strings.Contains(nudgeReason("S", Config{DB: "/h/graph.db"}.CLI()), "plasticity --db '/h/graph.db' --no-log add") {
+		t.Fatal("log=false must pass --no-log to the suggested commands")
 	}
 	if out, _ := Stop(e, Input{SessionID: "S", TranscriptPath: many}, cfg); out != nil {
 		t.Fatal("nudged twice")
@@ -240,6 +246,31 @@ func TestSetup(t *testing.T) {
 	if s, _ := Setup(ctx, e, Config{Embeddings: "fakesetup"}, home); s != "up to date" {
 		t.Fatalf("up to date: %q", s)
 	}
+	// "auto" keeps an embedder configured by hand.
+	if s, _ := Setup(ctx, e, Config{Embeddings: "auto"}, home); s != "up to date" {
+		t.Fatalf("auto with a configured embedder: %q", s)
+	}
+	// Switching to another provider replaces it (here: fails, and backs off).
+	if _, err := Setup(ctx, e, Config{Embeddings: "broken"}, home); err == nil {
+		t.Fatal("switching provider must try the new one")
+	}
+	os.Remove(filepath.Join(home, "setup.failed"))
+	// "off" turns a configured embedder off, also for later processes.
+	if s, _ := Setup(ctx, e, Config{Embeddings: "off"}, home); s != "embeddings turned off" {
+		t.Fatalf("off after setup: %q", s)
+	}
+	later, err := engine.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, _ := later.EmbedStatus()
+	later.Close()
+	if st.Config != nil || st.Active != "" {
+		t.Fatalf("embedder still active after off: %+v", st)
+	}
+	if s, _ := Setup(ctx, e, Config{Embeddings: "off"}, home); s != "embeddings disabled" {
+		t.Fatalf("off again: %q", s)
+	}
 
 	// Failures back off for a day.
 	e2 := newEngine(t)
@@ -249,6 +280,45 @@ func TestSetup(t *testing.T) {
 	}
 	if s, err := Setup(ctx, e2, Config{Embeddings: "broken"}, home2); err != nil || !strings.Contains(s, "retrying later") {
 		t.Fatalf("backoff: %q %v", s, err)
+	}
+}
+
+func TestCloseAbandonedSkipsFailures(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "g.db")
+	e, err := engine.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	for _, id := range []string{"broken", "fine"} {
+		e.StartSession(id, "/repo", "startup", "")
+		e.NotePrompt(id, "/repo", "a prompt about sqlite in "+id)
+	}
+	// Closing "broken" always fails.
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER fail BEFORE UPDATE OF ended_at ON sessions WHEN NEW.id = 'broken'
+		BEGIN SELECT RAISE(ABORT, 'simulated failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	cfg := Config{Embeddings: "off", SessionIdle: -time.Hour}
+	out, err := SessionStart(e, Input{SessionID: "new", Source: "startup"}, "/repo", cfg)
+	if err != nil || out == nil || !strings.Contains(out.Specific.AdditionalContext, "This session's ID is new") {
+		t.Fatalf("session start must not depend on closing old sessions: %v %+v", err, out)
+	}
+	n, err := CloseAbandoned(e, cfg, 5)
+	if err != nil || n != 2 { // "fine" and the empty "new"
+		t.Fatalf("closed %d: %v", n, err)
+	}
+	if s, _ := e.Session("fine"); s.EndedAt.IsZero() || s.EpisodeID == "" {
+		t.Fatalf("session after a failing one not closed: %+v", s)
+	}
+	evs, _ := e.Events(store.EventFilter{Session: "broken", Kind: engine.EventError})
+	if len(evs) != 1 || !strings.Contains(string(evs[0].Payload), `"op":"close-session"`) {
+		t.Fatalf("failure not logged: %+v", evs)
 	}
 }
 
@@ -264,6 +334,9 @@ func TestSessionStartClosesAbandonedSessions(t *testing.T) {
 	idle := cfg
 	idle.SessionIdle = -time.Hour
 	if _, err := SessionStart(e, Input{SessionID: "new"}, "/repo", idle); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CloseAbandoned(e, idle, 3); err != nil {
 		t.Fatal(err)
 	}
 	s, _ := e.Session("old")

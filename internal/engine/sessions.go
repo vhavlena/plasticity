@@ -252,15 +252,15 @@ func (e *Engine) findDuplicate(n *model.Node, vec *nodeVector) (*model.Node, flo
 	var sim float64
 	var reason string
 	err := e.st.Read(func(tx *store.Tx) error {
-		hits, err := tx.Search(MatchExpr(n.Title), e.bm25Weights(), 5)
+		same, err := tx.FindTitle(titlePattern(n.Title), func(title string) bool {
+			return normTitle(title) == normTitle(n.Title)
+		})
 		if err != nil {
 			return err
 		}
-		for _, h := range hits {
-			if normTitle(h.Node.Title) == normTitle(n.Title) {
-				dup, sim, reason = h.Node, 1, "same title"
-				return nil
-			}
+		if same != nil {
+			dup, sim, reason = same, 1, "same title"
+			return nil
 		}
 		if vec == nil || e.emb == nil {
 			return nil
@@ -284,6 +284,29 @@ func (e *Engine) findDuplicate(n *model.Node, vec *nodeVector) (*model.Node, flo
 
 func normTitle(s string) string {
 	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
+}
+
+// titlePattern is a LIKE pattern matched by every title equal to title up
+// to case and whitespace: its words in order, separated by %. SQLite's LIKE
+// ignores case only for ASCII, so other characters match any character (_).
+func titlePattern(title string) string {
+	var b strings.Builder
+	b.WriteByte('%')
+	for _, w := range strings.Fields(strings.ToLower(title)) {
+		for _, r := range w {
+			switch {
+			case r == '%' || r == '_' || r == '\\':
+				b.WriteByte('\\')
+				b.WriteRune(r)
+			case r > 127:
+				b.WriteByte('_')
+			default:
+				b.WriteRune(r)
+			}
+		}
+		b.WriteByte('%')
+	}
+	return b.String()
 }
 
 // linkToSession links node to the session's most recent used/created
@@ -379,6 +402,10 @@ type EpisodeReport struct {
 	Consolidated *ConsolidateReport `json:"consolidated,omitempty"`
 }
 
+// errSessionClosing aborts creating an episode for a session that another
+// process has given one in the meantime.
+var errSessionClosing = errors.New("session is being closed by another process")
+
 // EndSession closes a session: it creates the session's episode neuron
 // (first prompt as title, prompts and edited files as content), links it to
 // the neurons the session used or created, and consolidates every
@@ -420,9 +447,20 @@ func (e *Engine) EndSession(session string, files []string) (*EpisodeReport, err
 				return nil, err
 			}
 			vec := e.embedNode(context.Background(), ep)
-			if err := e.insertNodes([]*model.Node{ep}, []*nodeVector{vec}, func(tx *store.Tx) error {
+			err := e.insertNodes([]*model.Node{ep}, []*nodeVector{vec}, func(tx *store.Tx) error {
+				cur, err := tx.GetSession(session)
+				if err != nil {
+					return err
+				}
+				if cur.EpisodeID != "" || !cur.EndedAt.IsZero() {
+					return errSessionClosing
+				}
 				return tx.SetSessionEpisode(session, ep.ID)
-			}); err != nil {
+			})
+			if errors.Is(err, errSessionClosing) {
+				return rep, nil // another process is closing it (concurrent session starts)
+			}
+			if err != nil {
 				return nil, err
 			}
 			if e.afterEpisode != nil {

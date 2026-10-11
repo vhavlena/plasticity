@@ -139,6 +139,27 @@ func scanNode(r scanner, extra ...any) (*model.Node, error) {
 	return &n, nil
 }
 
+// FindTitle returns the first node, shortest title first, whose title
+// matches the LIKE pattern (escape character \) and satisfies same; nil if
+// none does.
+func (t *Tx) FindTitle(pattern string, same func(title string) bool) (*model.Node, error) {
+	rows, err := t.tx.Query(`SELECT `+nodeCols+` FROM nodes WHERE title LIKE ? ESCAPE '\' ORDER BY length(title)`, pattern)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		n, err := scanNode(rows)
+		if err != nil {
+			return nil, err
+		}
+		if same(n.Title) {
+			return n, nil
+		}
+	}
+	return nil, rows.Err()
+}
+
 // InsertNode adds a new node.
 func (t *Tx) InsertNode(n *model.Node) error {
 	_, err := t.tx.Exec(`INSERT INTO nodes (`+nodeCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,

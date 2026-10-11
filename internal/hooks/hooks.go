@@ -59,17 +59,22 @@ type Config struct {
 	ContextBudget int
 	// DB is the graph the hook opened. Commands Claude runs through Bash see
 	// neither the plugin options nor the session's cwd, so the commands the
-	// hooks suggest name this graph explicitly (see CLI).
+	// hooks suggest name this graph (and the log option) explicitly (see CLI).
 	DB string
 }
 
 // CLI returns the command prefix for the commands the hooks suggest to
-// Claude: plasticity --db '<DB>', or plain plasticity without a DB.
+// Claude: plasticity --db '<DB>' (without a DB: plain plasticity), plus
+// --no-log when the event log is off.
 func (c Config) CLI() string {
-	if c.DB == "" {
-		return "plasticity"
+	cli := "plasticity"
+	if c.DB != "" {
+		cli += " --db " + shellQuote(c.DB)
 	}
-	return "plasticity --db " + shellQuote(c.DB)
+	if !c.Log {
+		cli += " --no-log"
+	}
+	return cli
 }
 
 // shellQuote quotes s as one POSIX shell word.
@@ -129,16 +134,6 @@ func SessionStart(e *engine.Engine, in Input, project string, cfg Config) (*Outp
 	if err := e.StartSession(in.SessionID, project, in.Source, in.TranscriptPath); err != nil {
 		return nil, err
 	}
-	// Close sessions that ended without a SessionEnd hook (crash, kill,
-	// hook timeout), so their episodes are not lost.
-	if stale, err := e.AbandonedSessions(cfg.SessionIdle, 3); err == nil {
-		for _, s := range stale {
-			files, _ := EditedFiles(s.Transcript, s.Project)
-			if _, err := e.EndSession(s.ID, files); err != nil {
-				return nil, err
-			}
-		}
-	}
 	st, err := e.Stats()
 	if err != nil {
 		return nil, err
@@ -164,6 +159,28 @@ Run every plasticity command as %s ... (it selects this session's memory).
   %s used --session %s ID [ID...]
 Use the plasticity:memory skill for guidance.`, st.Nodes, cfg.Scope, search, id, cli, cli, id, cli, id, cli, id)
 	return contextOutput("SessionStart", text), nil
+}
+
+// CloseAbandoned closes up to limit sessions that ended without a SessionEnd
+// hook (crash, kill, hook timeout), so their episodes are not lost. It runs
+// in the async setup hook: closing embeds and may consolidate, which must
+// not delay or block the session-start context. A session that fails to
+// close is logged and skipped (it is retried at the next session start).
+func CloseAbandoned(e *engine.Engine, cfg Config, limit int) (int, error) {
+	stale, err := e.AbandonedSessions(cfg.SessionIdle, limit)
+	if err != nil {
+		return 0, err
+	}
+	closed := 0
+	for _, s := range stale {
+		files, _ := EditedFiles(s.Transcript, s.Project)
+		if _, err := e.EndSession(s.ID, files); err != nil {
+			e.Log(s.ID, engine.EventError, map[string]string{"op": "close-session", "error": err.Error()})
+			continue
+		}
+		closed++
+	}
+	return closed, nil
 }
 
 // trivial reports prompts that need no recall: slash commands and very
