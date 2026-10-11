@@ -195,3 +195,48 @@ func TestExportSessions(t *testing.T) {
 		t.Error("unknown label strategy accepted")
 	}
 }
+
+func TestNotesAndUsageByChange(t *testing.T) {
+	l := &eventLog{}
+	l.prompt("S1", "how do we store the graph", 0.9, "A")
+	l.add("S1", engine.EventNote, map[string]any{"kind": "noise", "text": "A was irrelevant", "ids": []string{"A"}})
+	// Two changes in a row (one tuning step) start one period.
+	l.add("", engine.EventParam, map[string]string{"key": "min_seed_strength", "old": "0.25", "new": "0.3"})
+	l.add("", engine.EventParam, map[string]string{"key": "result_limit", "old": "10", "new": "6"})
+	l.prompt("S2", "the schema pin", 0.2)
+	l.add("S2", engine.EventNote, map[string]any{"kind": "miss", "text": "the schema pin memory was not recalled"})
+	l.prompt("S2", "and the loader", 0.7, "B")
+	l.used("S2", 0, "B")
+	l.add("", engine.EventParam, map[string]string{"key": "embedder", "old": "", "new": "hugot:x"})
+
+	u := AnalyzeUsage(l.evs)
+	if u.Notes["noise"] != 1 || u.Notes["miss"] != 1 || len(u.NoteLog) != 2 || u.NoteLog[0].IDs[0] != "A" || len(u.Changes) != 3 {
+		t.Fatalf("notes/changes: %+v %+v %+v", u.Notes, u.NoteLog, u.Changes)
+	}
+	var b strings.Builder
+	u.WriteText(&b)
+	for _, want := range []string{"1 miss", "noise: A was irrelevant", "min_seed_strength 0.25→0.3", "embedder -→hugot:x"} {
+		if !strings.Contains(b.String(), want) {
+			t.Errorf("text report lacks %q:\n%s", want, b.String())
+		}
+	}
+
+	ps := UsageByChange(l.evs)
+	if len(ps) != 3 {
+		t.Fatalf("periods: %d", len(ps))
+	}
+	if ps[0].Change != nil || ps[0].Usage.Recalls != 1 || ps[0].Usage.Notes["noise"] != 1 {
+		t.Errorf("first period: %+v", ps[0].Usage)
+	}
+	if c := ps[1].Change; c == nil || !strings.Contains(c.String(), "min_seed_strength") || !strings.Contains(c.String(), "result_limit 10→6") ||
+		ps[1].Usage.Recalls != 2 || ps[1].Usage.Notes["miss"] != 1 || ps[1].Usage.BySource["prompt"].UsageRate != 1 {
+		t.Errorf("second period: %v %+v", c, ps[1].Usage)
+	}
+	if c := ps[2].Change; c == nil || c.Key != "embedder" || ps[2].Usage.Recalls != 0 {
+		t.Errorf("last period: %+v", ps[2])
+	}
+	b.Reset()
+	if err := WritePeriods(&b, ps); err != nil || !strings.Contains(b.String(), "(initial settings)") || !strings.Contains(b.String(), "100%") {
+		t.Errorf("periods table: %v\n%s", err, b.String())
+	}
+}

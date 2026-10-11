@@ -535,3 +535,36 @@ func TestPluginHooksAreWired(t *testing.T) {
 		t.Fatal("bin/plasticity shim missing or not executable")
 	}
 }
+
+func TestNotesAndChangePeriods(t *testing.T) {
+	c := newCLI(t)
+	id := c.add("Use SQLite WAL for storage", "many readers")
+	in := func(prompt string) map[string]any {
+		return map[string]any{"session_id": "S1", "cwd": t.TempDir(), "prompt": prompt}
+	}
+	c.hook("prompt", in("why sqlite storage for the graph"))
+	c.json(nil, "note", "-k", "helped", "-s", "S1", "--id", id, "the WAL decision was right there")
+	if _, err := c.run("note", "-k", "bogus", "x"); err == nil {
+		t.Fatal("unknown note kind accepted")
+	}
+	c.json(nil, "params", "set", "min_seed_strength", "0.3")
+	c.hook("prompt", in("what storage engine do we use"))
+	c.json(nil, "note", "-k", "miss", "-s", "S1", "nothing about the engine choice")
+
+	var ps []struct {
+		Change *struct{ Key, Old, New string }
+		Usage  struct {
+			Recalls int
+			Notes   map[string]int
+		}
+	}
+	c.json(&ps, "eval", "report", "--by-change", "--json")
+	if len(ps) != 2 || ps[0].Change != nil || ps[0].Usage.Notes["helped"] != 1 ||
+		ps[1].Change == nil || ps[1].Change.New != "0.3" || ps[1].Usage.Recalls != 1 || ps[1].Usage.Notes["miss"] != 1 {
+		t.Fatalf("periods: %+v", ps)
+	}
+	out, err := c.run("eval", "report")
+	if err != nil || !strings.Contains(string(out), "1 miss") || !strings.Contains(string(out), "min_seed_strength 0.25→0.3") {
+		t.Fatalf("text report: %v\n%s", err, out)
+	}
+}

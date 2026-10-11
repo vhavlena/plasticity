@@ -93,7 +93,7 @@ func newRoot(out io.Writer, in io.Reader) *cobra.Command {
 	root.PersistentFlags().BoolVar(&a.noEmbed, "no-embed", false, "ignore embeddings: lexical seeding only (for comparisons)")
 
 	root.AddCommand(
-		a.initCmd(), a.addCmd(), a.usedCmd(), a.logCmd(), a.hookCmd(), a.getCmd(), a.updateCmd(), a.deleteCmd(),
+		a.initCmd(), a.addCmd(), a.usedCmd(), a.noteCmd(), a.logCmd(), a.hookCmd(), a.getCmd(), a.updateCmd(), a.deleteCmd(),
 		a.linkCmd(), a.unlinkCmd(), a.searchCmd(), a.recallCmd(),
 		a.reinforceCmd(), a.feedbackCmd(), a.consolidateCmd(),
 		a.statsCmd(), a.exportCmd(), a.paramsCmd(), a.embedCmd(), a.evalCmd(),
@@ -217,6 +217,35 @@ a session, at least two neurons are reinforced as used together.`,
 		},
 	}
 	c.Flags().StringVarP(&session, "session", "s", "", "session ID")
+	return c
+}
+
+func (a *app) noteCmd() *cobra.Command {
+	var session, kind string
+	var ids []string
+	c := &cobra.Command{
+		Use:   "note TEXT...",
+		Short: "Log an observation about the memory (a miss, noise, a memory that helped)",
+		Long: `Notes are your observations during evaluation, shown by 'eval report' next
+to the measured numbers:
+  miss    something stored was not recalled when it should have been
+  noise   an injected memory was irrelevant
+  helped  a memory clearly helped
+  other   anything else`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			text := strings.Join(args, " ")
+			return a.with(func(e *engine.Engine) (any, error) {
+				if err := e.Note(session, kind, text, ids); err != nil {
+					return nil, err
+				}
+				return map[string]string{"kind": kind, "text": text}, nil
+			})
+		},
+	}
+	c.Flags().StringVarP(&session, "session", "s", "", "session ID")
+	c.Flags().StringVarP(&kind, "kind", "k", "other", "note kind: "+strings.Join(engine.NoteKinds, "|"))
+	c.Flags().StringSliceVar(&ids, "id", nil, "neurons concerned (repeatable)")
 	return c
 }
 

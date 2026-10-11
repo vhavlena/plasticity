@@ -143,3 +143,38 @@ func TestWithoutLog(t *testing.T) {
 		t.Fatalf("events logged despite WithoutLog: %v", evs)
 	}
 }
+
+func TestNotesAndParamChangesAreLogged(t *testing.T) {
+	f := newFixture(t)
+	if err := f.e.Note("S", "miss", "forgot the schema pin", []string{f.ids["hebb"]}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.e.Note("S", "bogus", "x", nil); err == nil {
+		t.Error("unknown note kind accepted")
+	}
+	if err := f.e.Note("S", "noise", "  ", nil); err == nil {
+		t.Error("empty note accepted")
+	}
+	if err := f.e.SetParam("min_seed_strength", "0.3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.e.SetParam("min_seed_strength", "0.3"); err != nil { // no change: not logged
+		t.Fatal(err)
+	}
+	if err := f.e.ResetParam("min_seed_strength"); err != nil {
+		t.Fatal(err)
+	}
+	notes, _ := f.e.Events(store.EventFilter{Kind: EventNote})
+	if len(notes) != 1 || notes[0].Session != "S" || !strings.Contains(string(notes[0].Payload), `"kind":"miss"`) {
+		t.Fatalf("notes: %+v", notes)
+	}
+	changes, _ := f.e.Events(store.EventFilter{Kind: EventParam})
+	if len(changes) != 2 ||
+		string(changes[0].Payload) != `{"key":"min_seed_strength","new":"0.3","old":"0.25"}` ||
+		string(changes[1].Payload) != `{"key":"min_seed_strength","new":"0.25","old":"0.3"}` {
+		for _, c := range changes {
+			t.Log(string(c.Payload))
+		}
+		t.Fatal("param changes not logged as expected")
+	}
+}

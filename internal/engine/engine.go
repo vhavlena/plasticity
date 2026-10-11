@@ -407,8 +407,18 @@ func (e *Engine) SetParam(key, value string) error {
 	if err := e.st.Write(func(tx *store.Tx) error { return tx.SetParam(key, value) }); err != nil {
 		return err
 	}
+	old := e.P.ToMap()[key]
 	e.P = p
+	e.logChange(key, old, p.ToMap()[key])
 	return nil
+}
+
+// logChange logs a change of a parameter or of the embedder, so that usage
+// reports can compare the periods before and after it.
+func (e *Engine) logChange(key, old, new string) {
+	if old != new {
+		e.Log("", EventParam, map[string]string{"key": key, "old": old, "new": new})
+	}
 }
 
 // ResetParam removes an override, restoring the default.
@@ -416,14 +426,19 @@ func (e *Engine) ResetParam(key string) error {
 	if _, ok := e.P.ToMap()[key]; !ok {
 		return fmt.Errorf("unknown parameter %q", key)
 	}
-	return e.st.Write(func(tx *store.Tx) error {
+	old := e.P.ToMap()[key]
+	if err := e.st.Write(func(tx *store.Tx) error {
 		if err := tx.ResetParam(key); err != nil {
 			return err
 		}
 		p, err := tx.LoadParams()
 		e.P = p
 		return err
-	})
+	}); err != nil {
+		return err
+	}
+	e.logChange(key, old, e.P.ToMap()[key])
+	return nil
 }
 
 // Stats returns graph statistics.

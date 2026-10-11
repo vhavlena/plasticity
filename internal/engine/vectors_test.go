@@ -11,6 +11,7 @@ import (
 
 	"github.com/vhavlena/plasticity/internal/embed"
 	"github.com/vhavlena/plasticity/internal/model"
+	"github.com/vhavlena/plasticity/internal/store"
 )
 
 // conceptEmbedder is a deterministic fake: each dimension is a concept, and
@@ -202,6 +203,19 @@ func TestRegisteredProvidersSideBySide(t *testing.T) {
 	}
 	if _, err := e.EnableEmbedding(ctx, embed.Config{Provider: "nope"}); err == nil || !strings.Contains(err.Error(), "concepts") {
 		t.Fatalf("unknown provider error should list registered ones: %v", err)
+	}
+	// Every embedder switch is logged as a change.
+	evs, _ := e.Events(store.EventFilter{Kind: EventParam})
+	var got []string
+	for _, ev := range evs {
+		got = append(got, string(ev.Payload))
+	}
+	want := []string{
+		`{"key":"embedder","new":"fake:v1","old":""}`, `{"key":"embedder","new":"fake:v2","old":"fake:v1"}`,
+		`{"key":"embedder","new":"fake:v1","old":"fake:v2"}`, `{"key":"embedder","new":"","old":"fake:v1"}`,
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("embedder changes:\n%s", strings.Join(got, "\n"))
 	}
 }
 

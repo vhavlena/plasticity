@@ -35,7 +35,8 @@ For development: `claude --plugin-dir /path/to/plasticity`.
   files, linked to the knowledge the session used and created.
 
 **Commands:** `/plasticity:remember <text>`, `/plasticity:recall <query>`,
-`/plasticity:status`, `/plasticity:setup`.
+`/plasticity:status`, `/plasticity:setup`, and `/plasticity:flag
+miss|noise|helped <what happened>` to record observations while evaluating.
 
 **Options** (`/plugin` → plasticity → configure):
 
@@ -99,7 +100,8 @@ go build -o plasticity ./cmd/plasticity
 go test -race ./...
 plasticity --help                           # full CLI
 plasticity eval run SCENARIO.json           # offline evaluation of recall and learning
-plasticity eval report --since 168h         # how memory behaved in real sessions
+plasticity eval report --since 168h         # how memory behaved in real sessions (+ your notes)
+plasticity eval report --by-change          # compare periods between parameter changes
 plasticity eval export -o mine.json         # replayable scenario from real sessions
 ```
 

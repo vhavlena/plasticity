@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -112,8 +113,42 @@ type Usage struct {
 	// per user prompt) and "claude" (recalls Claude ran itself).
 	BySource map[string]*SourceUsage `json:"by_source"`
 
+	// The user's observations (plasticity note) and the parameter or
+	// embedder changes in the period.
+	Notes   map[string]int `json:"notes"` // by kind
+	NoteLog []UsageNote    `json:"note_log,omitempty"`
+	Changes []UsageChange  `json:"changes,omitempty"`
+
 	Errors map[string]int `json:"errors,omitempty"` // by operation
 	Days   []UsageDay     `json:"days"`
+}
+
+// UsageNote is a logged observation of the user.
+type UsageNote struct {
+	At      time.Time `json:"ts"`
+	Session string    `json:"session,omitempty"`
+	Kind    string    `json:"kind"`
+	Text    string    `json:"text"`
+	IDs     []string  `json:"ids,omitempty"`
+}
+
+// UsageChange is a logged parameter or embedder change.
+type UsageChange struct {
+	At  time.Time `json:"ts"`
+	Key string    `json:"key"`
+	Old string    `json:"old"`
+	New string    `json:"new"`
+}
+
+func (c UsageChange) String() string {
+	old, new := c.Old, c.New
+	if old == "" {
+		old = "-"
+	}
+	if new == "" {
+		new = "-"
+	}
+	return fmt.Sprintf("%s %s→%s", c.Key, old, new)
 }
 
 // SourceUsage is recall and use of one recall source. A neuron used in a
@@ -155,7 +190,7 @@ func confidenceBucket(c float64) string {
 
 // AnalyzeUsage computes the usage report from events (oldest first).
 func AnalyzeUsage(events []store.Event) *Usage {
-	u := &Usage{Confidence: map[string]int{}, Errors: map[string]int{}, BySource: map[string]*SourceUsage{}}
+	u := &Usage{Confidence: map[string]int{}, Errors: map[string]int{}, BySource: map[string]*SourceUsage{}, Notes: map[string]int{}}
 	for _, b := range ConfidenceBuckets {
 		u.Confidence[b.Name] = 0
 	}
@@ -293,6 +328,17 @@ func AnalyzeUsage(events []store.Event) *Usage {
 				u.Pruned += p.Pruned
 				d.Pruned += p.Pruned
 			}
+		case engine.EventNote:
+			if n, ok := decode[UsageNote](ev); ok {
+				n.At, n.Session = ev.At, ev.Session
+				u.Notes[n.Kind]++
+				u.NoteLog = append(u.NoteLog, n)
+			}
+		case engine.EventParam:
+			if c, ok := decode[UsageChange](ev); ok {
+				c.At = ev.At
+				u.Changes = append(u.Changes, c)
+			}
 		case engine.EventError:
 			p, _ := decode[errorPayload](ev)
 			if p.Op == "" {
@@ -376,7 +422,7 @@ func AnalyzeUsage(events []store.Event) *Usage {
 
 // WriteText prints the usage report.
 func (u *Usage) WriteText(w io.Writer) error {
-	if u.Prompts == 0 && u.Recalls == 0 && u.Created == 0 {
+	if u.Prompts == 0 && u.Recalls == 0 && u.Created == 0 && len(u.NoteLog) == 0 {
 		_, err := fmt.Fprintln(w, "no logged activity in the selected range")
 		return err
 	}
@@ -420,6 +466,26 @@ func (u *Usage) WriteText(w io.Writer) error {
 	fmt.Fprintln(tw, "learning")
 	row("links", "%d created, %d potentiated, %d depressed, %d pruned (%d consolidations)",
 		u.LinksCreated, u.Potentiated, u.Depressed, u.Pruned, u.Consolidated)
+	if len(u.NoteLog) > 0 {
+		fmt.Fprintln(tw, "your notes")
+		var kinds []string
+		for _, k := range engine.NoteKinds {
+			if u.Notes[k] > 0 {
+				kinds = append(kinds, fmt.Sprintf("%d %s", u.Notes[k], k))
+			}
+		}
+		row("notes", "%s", strings.Join(kinds, ", "))
+		from := max(0, len(u.NoteLog)-maxNotesShown)
+		for _, n := range u.NoteLog[from:] {
+			row("  "+n.At.Local().Format("01-02 15:04"), "%s: %s", n.Kind, truncateText(n.Text, 100))
+		}
+	}
+	if len(u.Changes) > 0 {
+		fmt.Fprintln(tw, "changes")
+		for _, c := range u.Changes {
+			row("  "+c.At.Local().Format("01-02 15:04"), "%s", c)
+		}
+	}
 	if len(u.Errors) > 0 {
 		row("errors", "%v", u.Errors)
 	}
@@ -442,6 +508,93 @@ func (u *Usage) confidenceText() string {
 		s += fmt.Sprintf(" %s:%d", b.Name, u.Confidence[b.Name])
 	}
 	return "[" + s[1:] + "]"
+}
+
+// maxNotesShown bounds the notes listed in the text report.
+const maxNotesShown = 10
+
+func truncateText(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > n {
+		return string(r[:n-1]) + "…"
+	}
+	return s
+}
+
+// UsagePeriod is the usage between two consecutive changes.
+type UsagePeriod struct {
+	Change *UsageChange `json:"change,omitempty"` // the change that starts the period (nil: the first)
+	Usage  *Usage       `json:"usage"`
+}
+
+// UsageByChange splits the events at each parameter or embedder change, so
+// periods with different settings can be compared. Consecutive changes
+// without prompts between them (one tuning step) start a single period.
+func UsageByChange(events []store.Event) []UsagePeriod {
+	var out []UsagePeriod
+	start := 0
+	var change *UsageChange
+	flush := func(end int) {
+		if end > start || change != nil {
+			out = append(out, UsagePeriod{Change: change, Usage: AnalyzeUsage(events[start:end])})
+		}
+	}
+	for i, ev := range events {
+		if ev.Kind != engine.EventParam {
+			continue
+		}
+		c, ok := decode[UsageChange](ev)
+		if !ok {
+			continue
+		}
+		c.At = ev.At
+		if change != nil && !hasActivity(events[start:i]) {
+			merged := *change
+			merged.Key, merged.Old, merged.New = change.String()+", "+c.Key, c.Old, c.New
+			change = &merged
+			continue
+		}
+		flush(i)
+		start, change = i, &c
+	}
+	flush(len(events))
+	return out
+}
+
+func hasActivity(evs []store.Event) bool {
+	for _, ev := range evs {
+		if ev.Kind == engine.EventPrompt || ev.Kind == engine.EventRecall {
+			return true
+		}
+	}
+	return false
+}
+
+// WritePeriods prints the key metrics of each period side by side.
+func WritePeriods(w io.Writer, ps []UsagePeriod) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
+	fmt.Fprintln(tw, "from\tchange\tsessions\trecalls\tempty\tusage(prompt)\tclaude/session\tcreated/session\treused\tmiss\tnoise\t")
+	for _, p := range ps {
+		u := p.Usage
+		from, change := "start", "(initial settings)"
+		if p.Change != nil {
+			from, change = p.Change.At.Local().Format("01-02 15:04"), p.Change.String()
+		} else if !u.From.IsZero() {
+			from = u.From.Local().Format("01-02 15:04")
+		}
+		prompt, claude := u.BySource[engine.RecallSourcePrompt], u.BySource[engine.RecallSourceClaude]
+		usage, own := "-", 0
+		if prompt != nil && prompt.Injected > 0 {
+			usage = pct(prompt.UsageRate)
+		}
+		if claude != nil {
+			own = claude.Recalls
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\t%s\t%.1f\t%.1f\t%d\t%d\t%d\t\n", from, change, u.Sessions, u.Recalls,
+			pct(u.EmptyRate), usage, perSession(own, u.Sessions), u.CreatedPerSession, u.CreatedRecalled+u.CreatedUsed,
+			u.Notes["miss"], u.Notes["noise"])
+	}
+	return tw.Flush()
 }
 
 func perSession(n, sessions int) float64 {

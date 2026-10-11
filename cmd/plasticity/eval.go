@@ -219,6 +219,7 @@ func (a *app) evalReportCmd() *cobra.Command {
 		sessions []string
 		since    time.Duration
 		asJSON   bool
+		byChange bool
 	)
 	c := &cobra.Command{
 		Use:   "report",
@@ -232,7 +233,11 @@ func (a *app) evalReportCmd() *cobra.Command {
               and per recall source
   creation    neurons created per session, near-duplicates caught, created
               neurons recalled or used again in later sessions, nudge response
-  learning    links created/potentiated/depressed by 'used', pruned by consolidation`,
+  learning    links created/potentiated/depressed by 'used', pruned by consolidation
+  notes       your observations ('plasticity note'), and parameter/embedder changes
+
+--by-change splits the period at every parameter or embedder change and
+compares the key metrics of the periods.`,
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			e, err := a.openLog()
@@ -244,6 +249,13 @@ func (a *app) evalReportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if byChange {
+				ps := eval.UsageByChange(evs)
+				if asJSON {
+					return a.print(ps)
+				}
+				return eval.WritePeriods(a.out, ps)
+			}
 			u := eval.AnalyzeUsage(evs)
 			if asJSON {
 				return a.print(u)
@@ -254,6 +266,7 @@ func (a *app) evalReportCmd() *cobra.Command {
 	c.Flags().StringSliceVarP(&sessions, "session", "s", nil, "only these sessions")
 	c.Flags().DurationVar(&since, "since", 0, "only events newer than this (e.g. 168h)")
 	c.Flags().BoolVar(&asJSON, "json", false, "print the report as JSON")
+	c.Flags().BoolVar(&byChange, "by-change", false, "compare the periods between parameter/embedder changes")
 	return c
 }
 

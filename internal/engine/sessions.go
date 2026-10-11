@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -31,7 +32,33 @@ const (
 	EventEpisode      = "episode"
 	EventConsolidate  = "consolidate"
 	EventError        = "error"
+	EventParam        = "param" // a parameter or the embedder changed
+	EventNote         = "note"  // the user's observation (plasticity note)
 )
+
+// Note kinds.
+var NoteKinds = []string{"miss", "noise", "helped", "other"}
+
+// Note logs the user's observation about the memory: a miss (something
+// stored was not recalled), noise (an irrelevant injection), a memory that
+// helped, or anything else. ids optionally name the neurons concerned.
+func (e *Engine) Note(session, kind, text string, ids []string) error {
+	if !slices.Contains(NoteKinds, kind) {
+		return fmt.Errorf("unknown note kind %q (%s)", kind, strings.Join(NoteKinds, "|"))
+	}
+	if strings.TrimSpace(text) == "" {
+		return fmt.Errorf("the note needs a text")
+	}
+	if e.noLog {
+		return fmt.Errorf("the event log is disabled")
+	}
+	payload := map[string]any{"kind": kind, "text": truncate(text, 2000)}
+	if len(ids) > 0 {
+		payload["ids"] = ids
+	}
+	raw, _ := json.Marshal(payload)
+	return e.st.Write(func(tx *store.Tx) error { return tx.LogEvent(timestamp(), session, EventNote, raw) })
+}
 
 // Recall sources, logged with each recall event.
 const (

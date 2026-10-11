@@ -253,7 +253,12 @@ func (e *Engine) EnableEmbedding(ctx context.Context, c embed.Config) (*ReindexR
 		return nil, fmt.Errorf("embedder does not work: %w", err)
 	}
 	raw, _ := json.Marshal(c)
+	var old string
 	if err := e.st.Write(func(tx *store.Tx) error {
+		var err error
+		if old, err = tx.GetConfig(embedderIDKey); err != nil {
+			return err
+		}
 		if err := tx.SetConfig(embedderKey, string(raw)); err != nil {
 			return err
 		}
@@ -264,13 +269,19 @@ func (e *Engine) EnableEmbedding(ctx context.Context, c embed.Config) (*ReindexR
 	}
 	e.releaseEmbedder()
 	e.embCfg, e.embID, e.emb, e.embOwned, e.injected, e.noEmbed = &c, emb.ID(), emb, true, false, false
+	e.logChange(embedderKey, old, emb.ID())
 	return e.Reindex(ctx, false)
 }
 
 // DisableEmbedding removes the stored embedder configuration. Vectors are
 // kept (see PruneVectors).
 func (e *Engine) DisableEmbedding() error {
+	var old string
 	if err := e.st.Write(func(tx *store.Tx) error {
+		var err error
+		if old, err = tx.GetConfig(embedderIDKey); err != nil {
+			return err
+		}
 		if err := tx.SetConfig(embedderKey, ""); err != nil {
 			return err
 		}
@@ -280,6 +291,7 @@ func (e *Engine) DisableEmbedding() error {
 	}
 	e.releaseEmbedder()
 	e.embCfg, e.embID = nil, ""
+	e.logChange(embedderKey, old, "")
 	return nil
 }
 
