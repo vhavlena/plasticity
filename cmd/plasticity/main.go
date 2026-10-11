@@ -95,7 +95,7 @@ func newRoot(out io.Writer, in io.Reader) *cobra.Command {
 		a.initCmd(), a.addCmd(), a.getCmd(), a.updateCmd(), a.deleteCmd(),
 		a.linkCmd(), a.unlinkCmd(), a.searchCmd(), a.recallCmd(),
 		a.reinforceCmd(), a.feedbackCmd(), a.consolidateCmd(),
-		a.statsCmd(), a.exportCmd(), a.paramsCmd(), a.embedCmd(),
+		a.statsCmd(), a.exportCmd(), a.paramsCmd(), a.embedCmd(), a.evalCmd(),
 	)
 	return root
 }

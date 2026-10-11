@@ -265,3 +265,43 @@ func TestEmbedCommands(t *testing.T) {
 		}
 	}
 }
+
+func TestEvalCommands(t *testing.T) {
+	c := newCLI(t)
+	dir := t.TempDir()
+	scen, rep := filepath.Join(dir, "s.json"), filepath.Join(dir, "r.json")
+	var g struct{ Nodes, Queries int }
+	c.json(&g, "eval", "gen", "--nodes", "60", "--topics", "3", "--sessions", "3", "--queries", "5", "-o", scen)
+	if g.Nodes != 60 || g.Queries != 15 {
+		t.Fatalf("gen: %+v", g)
+	}
+	out, err := c.run("eval", "run", scen, "--learn", "none,explicit", "--passes", "2", "--json", rep)
+	if err != nil {
+		t.Fatalf("eval run: %v\n%s", err, out)
+	}
+	for _, want := range []string{"none/lexical", "explicit/lexical", "assoc-recall", "recall p50"} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("report lacks %q:\n%s", want, out)
+		}
+	}
+	raw, err := os.ReadFile(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r struct {
+		Results []struct {
+			Learn  string
+			Passes []struct{ Queries int }
+		}
+	}
+	if err := json.Unmarshal(raw, &r); err != nil || len(r.Results) != 2 || len(r.Results[1].Passes) != 2 || r.Results[1].Passes[0].Queries != 15 {
+		t.Fatalf("json report: %v %s", err, raw)
+	}
+	// The hand-made scenario shipped with the repo must stay valid.
+	if out, err := c.run("eval", "run", "../../scenarios/plasticity-design.json", "--learn", "none", "--passes", "1"); err != nil {
+		t.Fatalf("plasticity-design scenario: %v\n%s", err, out)
+	}
+	if _, err := c.run("eval", "run", scen, "--learn", "bogus"); err == nil {
+		t.Fatal("unknown learning mode accepted")
+	}
+}

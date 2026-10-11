@@ -90,27 +90,45 @@ func timestamp() time.Time { return time.Now().UTC() }
 // AddNode validates and stores a new node, assigning ID and timestamps, and
 // embeds it if embeddings are enabled.
 func (e *Engine) AddNode(n *model.Node) (*model.Node, error) {
-	now := timestamp()
-	n.ID = ulid.MustNew(ulid.Timestamp(now), ulid.DefaultEntropy()).String()
-	n.CreatedAt, n.UpdatedAt = now, now
-	n.Dormant, n.Fires = false, 0
-	if err := n.Validate(); err != nil {
+	if err := e.AddNodes([]*model.Node{n}); err != nil {
 		return nil, err
 	}
-	vec := e.embedNode(context.Background(), n) // outside the write transaction
-	return n, e.st.Write(func(tx *store.Tx) error {
+	return n, nil
+}
+
+// AddNodes adds several nodes in one transaction (all or none), assigning
+// IDs and timestamps and embedding them if embeddings are enabled.
+func (e *Engine) AddNodes(nodes []*model.Node) error {
+	now := timestamp()
+	vecs := make([]*nodeVector, len(nodes))
+	for i, n := range nodes {
+		n.ID = ulid.MustNew(ulid.Timestamp(now), ulid.DefaultEntropy()).String()
+		n.CreatedAt, n.UpdatedAt = now, now
+		n.Dormant, n.Fires = false, 0
+		if err := n.Validate(); err != nil {
+			return fmt.Errorf("node %d (%q): %w", i, n.Title, err)
+		}
+	}
+	for i, n := range nodes {
+		vecs[i] = e.embedNode(context.Background(), n) // outside the write transaction
+	}
+	return e.st.Write(func(tx *store.Tx) error {
 		tick, err := tx.Tick()
 		if err != nil {
 			return err
 		}
-		n.CreatedTick = tick
-		if err := tx.InsertNode(n); err != nil {
-			return err
+		for i, n := range nodes {
+			n.CreatedTick = tick
+			if err := tx.InsertNode(n); err != nil {
+				return err
+			}
+			if v := vecs[i]; v != nil {
+				if err := tx.PutVector(n.ID, v.model, v.hash, v.blob); err != nil {
+					return err
+				}
+			}
 		}
-		if vec == nil {
-			return nil
-		}
-		return tx.PutVector(n.ID, vec.model, vec.hash, vec.blob)
+		return nil
 	})
 }
 
@@ -274,35 +292,64 @@ func (e *Engine) GetNode(id string) (*NodeView, error) {
 // Link creates or overwrites an explicit edge src → dst. For associative
 // edges the direction is irrelevant. weight ≤ 0 selects the default.
 func (e *Engine) Link(src, dst string, kind model.EdgeKind, weight float64) (*model.Edge, error) {
-	if !kind.Valid() {
-		return nil, fmt.Errorf("invalid edge kind %q", kind)
-	}
-	if src == dst {
-		return nil, fmt.Errorf("self-loops are not allowed")
-	}
-	if weight > 1 {
-		return nil, fmt.Errorf("weight must be in (0,1], got %g", weight)
-	}
-	now := timestamp()
 	var ed *model.Edge
 	err := e.st.Write(func(tx *store.Tx) error {
-		nodes, err := mustExist(tx, src, dst)
-		if err != nil {
+		if err := e.linkTx(tx, src, dst, kind, weight, timestamp()); err != nil {
 			return err
 		}
-		ed = plasticity.NewTyped(src, dst, kind, weight, nodes[src].Fires, nodes[dst].Fires, now, e.P)
-		if kind == model.KindAssociative {
-			ed.Stability = e.P.InitialStability // UpsertEdge canonicalizes the order
-		}
-		if old, err := tx.GetEdge(ed.Src, ed.Dst, kind); err != nil {
-			return err
-		} else if old != nil {
-			ed.Stability = max(ed.Stability, old.Stability)
-			ed.Coactivations = old.Coactivations
-		}
-		return tx.UpsertEdge(ed)
+		var err error
+		ed, err = tx.GetEdge(src, dst, kind)
+		return err
 	})
 	return ed, err
+}
+
+// linkTx validates and upserts one explicit edge inside a transaction.
+func (e *Engine) linkTx(tx *store.Tx, src, dst string, kind model.EdgeKind, weight float64, now time.Time) error {
+	if !kind.Valid() {
+		return fmt.Errorf("invalid edge kind %q", kind)
+	}
+	if src == dst {
+		return fmt.Errorf("self-loops are not allowed")
+	}
+	if weight > 1 {
+		return fmt.Errorf("weight must be in (0,1], got %g", weight)
+	}
+	nodes, err := mustExist(tx, src, dst)
+	if err != nil {
+		return err
+	}
+	ed := plasticity.NewTyped(src, dst, kind, weight, nodes[src].Fires, nodes[dst].Fires, now, e.P)
+	if kind == model.KindAssociative {
+		ed.Stability = e.P.InitialStability // UpsertEdge canonicalizes the order
+	}
+	if old, err := tx.GetEdge(ed.Src, ed.Dst, kind); err != nil {
+		return err
+	} else if old != nil {
+		ed.Stability = max(ed.Stability, old.Stability)
+		ed.Coactivations = old.Coactivations
+	}
+	return tx.UpsertEdge(ed)
+}
+
+// LinkSpec describes an edge for AddLinks.
+type LinkSpec struct {
+	Src, Dst string
+	Kind     model.EdgeKind
+	Weight   float64 // ≤ 0: default for the kind
+}
+
+// AddLinks creates or overwrites several edges in one transaction.
+func (e *Engine) AddLinks(links []LinkSpec) error {
+	now := timestamp()
+	return e.st.Write(func(tx *store.Tx) error {
+		for _, l := range links {
+			if err := e.linkTx(tx, l.Src, l.Dst, l.Kind, l.Weight, now); err != nil {
+				return fmt.Errorf("link %s→%s: %w", l.Src, l.Dst, err)
+			}
+		}
+		return nil
+	})
 }
 
 // Unlink removes an edge.

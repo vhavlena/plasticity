@@ -32,7 +32,13 @@ type ConsolidateReport struct {
 func (e *Engine) Consolidate(pruneTyped bool) (*ConsolidateReport, error) {
 	rep := &ConsolidateReport{}
 
-	// 1. Pruning, paged over all edges.
+	// 1. One pass over all edges: prune, and record each node's degree and
+	// summed associative weight among the surviving edges, so that steps 2
+	// and 3 need no per-node queries. (Edges written concurrently during
+	// consolidation may be missed; dormancy and scaling are advisory and
+	// catch up on the next run.)
+	degree := map[string]int{}
+	assocSum := map[string]float64{}
 	var after store.EdgeKey
 	for {
 		var page []*model.Edge
@@ -47,6 +53,14 @@ func (e *Engine) Consolidate(pruneTyped bool) (*ConsolidateReport, error) {
 						return err
 					}
 					rep.Pruned++
+					continue
+				}
+				degree[ed.Src]++
+				degree[ed.Dst]++
+				if !ed.Kind.Typed() {
+					w := plasticity.EffectiveWeight(ed, e.P)
+					assocSum[ed.Src] += w
+					assocSum[ed.Dst] += w
 				}
 			}
 			return nil
@@ -62,7 +76,26 @@ func (e *Engine) Consolidate(pruneTyped bool) (*ConsolidateReport, error) {
 		after = store.EdgeKey{Src: last.Src, Dst: last.Dst, Kind: last.Kind}
 	}
 
-	// 2. Homeostasis + dormancy, paged over all nodes.
+	// 2. Homeostasis, only for nodes over the limit.
+	var over []string
+	for id, sum := range assocSum {
+		if sum > e.P.MaxOutWeight {
+			over = append(over, id)
+		}
+	}
+	sort.Strings(over)
+	for start := 0; start < len(over); start += batchSize {
+		batch := over[start:min(start+batchSize, len(over))]
+		if err := e.st.Write(func(tx *store.Tx) error {
+			n, err := e.homeostasis(tx, batch)
+			rep.Scaled += n
+			return err
+		}); err != nil {
+			return rep, err
+		}
+	}
+
+	// 3. Dormancy, paged over all nodes.
 	afterID := ""
 	for {
 		var ids []string
@@ -71,12 +104,7 @@ func (e *Engine) Consolidate(pruneTyped bool) (*ConsolidateReport, error) {
 			if ids, err = tx.NodeIDsAfter(afterID, batchSize); err != nil || len(ids) == 0 {
 				return err
 			}
-			n, err := e.homeostasis(tx, ids)
-			if err != nil {
-				return err
-			}
-			rep.Scaled += n
-			return e.updateDormancy(tx, ids, rep)
+			return e.updateDormancy(tx, ids, degree, rep)
 		})
 		if err != nil {
 			return rep, err
@@ -87,7 +115,7 @@ func (e *Engine) Consolidate(pruneTyped bool) (*ConsolidateReport, error) {
 		afterID = ids[len(ids)-1]
 	}
 
-	// 3. Trace retention: forget pending traces nobody learned from.
+	// 4. Trace retention: forget pending traces nobody learned from.
 	err := e.st.Write(func(tx *store.Tx) error {
 		tick, err := tx.Tick()
 		if err != nil {
@@ -101,7 +129,8 @@ func (e *Engine) Consolidate(pruneTyped bool) (*ConsolidateReport, error) {
 
 // updateDormancy marks isolated, rarely accessed nodes dormant (creation
 // counts as an access) and wakes dormant nodes that regained synapses.
-func (e *Engine) updateDormancy(tx *store.Tx, ids []string, rep *ConsolidateReport) error {
+// degree holds the nodes' edge counts.
+func (e *Engine) updateDormancy(tx *store.Tx, ids []string, degree map[string]int, rep *ConsolidateReport) error {
 	now, err := tx.Tick()
 	if err != nil {
 		return err
@@ -116,12 +145,8 @@ func (e *Engine) updateDormancy(tx *store.Tx, ids []string, rep *ConsolidateRepo
 	}
 	for _, id := range ids {
 		n := nodes[id]
-		deg, err := tx.Degree(id)
-		if err != nil {
-			return err
-		}
 		b := plasticity.BaseLevel(append(acc[id], n.CreatedTick), now, e.P.ActrDecay)
-		dormant := deg == 0 && b < e.P.DormantBelow
+		dormant := degree[id] == 0 && b < e.P.DormantBelow
 		if dormant == n.Dormant {
 			continue
 		}

@@ -175,7 +175,11 @@ vectors in a graph must come from the same model.
   `embed prune` deletes every embedder's vectors except the active one's.
 - **Known library issues.** hugot v0.8.2's Go backend crashes on batches whose
   size isn't one of its internal buckets, so texts are embedded one at a
-  time. Its matmul code also trips Go's checkptr checks under `-race`, so
+  time. Its Go backend also compiles and keeps one graph for every distinct
+  input token length, without padding or limit. A CLI call sees one or two
+  lengths (~390 MB peak), but long-running processes such as `eval` with
+  embeddings grow by one graph per new length (several GB at most, bounded
+  by `embed_max_words`). Its matmul code also trips Go's checkptr checks under `-race`, so
   the real-model tests skip themselves there. To run those tests, set
   `PLASTICITY_TEST_MODEL` to a downloaded model directory.
 
@@ -217,6 +221,59 @@ There are two ways to plug one in:
   works. The built-in `hugot` and `ollama` providers register themselves the
   same way, in `internal/embed/hugot.go` and `internal/embed/ollama.go`.
 
+## Evaluation
+
+`plasticity eval` replays scenarios through the engine in a temporary
+database (your graph is never touched) and compares configurations:
+
+```sh
+plasticity eval run scenarios/plasticity-design.json \
+    --learn none,reinforce,feedback,explicit --embed none,hugot --passes 3 [--json report.json]
+plasticity eval gen --nodes 50000 --topics 1500 --noise-links 5 -o big.json   # synthetic, for scale
+plasticity eval run big.json --learn none,feedback --passes 1
+```
+
+**Scenarios** are JSON files containing nodes, explicit links, and sessions
+of queries labeled with their relevant nodes.
+`scenarios/plasticity-design.json` is hand-made from this project's design
+history: 40 nodes and 40 paraphrased queries. `eval gen` builds synthetic
+topic clusters with hidden groups of nodes that are used together. Each
+query names only one member of a group, so the other members can be found
+only through links, learning or embeddings.
+
+**Learning modes** simulate what happens after each recall:
+
+| mode | what it does |
+|---|---|
+| `none` | no learning (baseline) |
+| `reinforce` | `reinforce --session` at the end of each session (unsupervised) |
+| `feedback` | `feedback` with the relevant nodes that were recalled |
+| `explicit` | `reinforce` with all relevant nodes (upper bound) |
+
+**The report shows, per pass:**
+- recall, precision, MRR and nDCG of the top k results;
+- **assoc-recall**: the share of relevant nodes that share no word with the
+  query and were still found;
+- the share of recalls that returned nothing, and of those that stored a
+  trace;
+- graph health: learned links, **spurious** links (between nodes never
+  relevant to the same query), weights, hub degree and pruning;
+- performance: load time, recall latency p50/p95/max, learn and consolidate
+  times, heap and database size;
+- engine warnings such as embedding failures, so problems are never
+  silently hidden.
+
+**First results** (k=10):
+
+| finding | evidence |
+|---|---|
+| Embeddings help most on real text | design scenario: assoc-recall 0.35 → 0.61, MRR 0.80 → 0.89 |
+| Learning helps when missing nodes are reported | `explicit`: assoc-recall 0.35 → 0.65 (keywords only), 0.61 → 0.78 (with embeddings) over 3 passes, with 0 spurious links |
+| `feedback` can't discover unrecalled nodes | no gain on the design scenario; +0.2 to 0.3 on synthetic data, where topic words bring group members into the top k |
+| Unsupervised `reinforce` mostly learns junk | 86–88 % of its learned links are spurious; precision drops |
+| Recall scales | p50 ≈ 6 ms, p95 ≈ 13 ms at 50k nodes and 250k links (keywords only) |
+| Costs | `consolidate` takes 2.5 s at 50k nodes (one pass over edges); loading 250k links takes 24 s; semantic recall adds ~40 ms per query |
+
 ## Layout
 
 ```
@@ -226,5 +283,7 @@ internal/store       SQLite schema, transactions, FTS5 search
 internal/plasticity  pure synaptic dynamics
 internal/retrieval   spreading activation, personalized PageRank
 internal/embed       embedders: hugot (in-process ONNX), Ollama
+internal/eval        scenario replay, metrics, synthetic generator
+scenarios/           evaluation scenarios
 internal/engine      orchestration: recall, learning, consolidation, export
 ```

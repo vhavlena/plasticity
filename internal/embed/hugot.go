@@ -47,6 +47,12 @@ func NewHugot(ctx context.Context, c Config) (*Hugot, error) {
 	if _, err := os.Stat(filepath.Join(c.Path, "tokenizer.json")); err != nil {
 		return nil, fmt.Errorf("hugot: model directory %s is missing or incomplete: %w", c.Path, err)
 	}
+	// hugot's Go backend compiles and caches one graph per distinct input
+	// token length, with no limit and no padding (sequence buckets only pad
+	// on the XLA backend; on Go they merely cap the cache, making further
+	// lengths fail). Short-lived CLI calls see one or two lengths; a
+	// long-running process grows by one graph per new length, bounded by the
+	// truncation in Truncate (embed_max_words).
 	s, err := hugot.NewGoSession(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("hugot session: %w", err)
