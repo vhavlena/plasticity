@@ -6,6 +6,9 @@ disable-model-invocation: true
 allowed-tools: Bash(plasticity *)
 ---
 
+Run every `plasticity` command below with the `--db` prefix given at session
+start (`plasticity --db '...'`), so it uses this session's memory.
+
 The user is evaluating the long-term memory and flags an observation: $ARGUMENTS
 
 1. Kind: the first word if it is `miss`, `noise`, `helped` or `other`; otherwise

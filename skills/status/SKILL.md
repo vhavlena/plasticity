@@ -5,6 +5,9 @@ disable-model-invocation: true
 allowed-tools: Bash(plasticity *)
 ---
 
+Run every `plasticity` command below with the `--db` prefix given at session
+start (`plasticity --db '...'`), so it uses this session's memory.
+
 Report the state of long-term memory concisely:
 
 1. `plasticity stats` — neurons by type, links by kind, dormant neurons, pending traces.

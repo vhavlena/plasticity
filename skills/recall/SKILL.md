@@ -6,6 +6,9 @@ disable-model-invocation: true
 allowed-tools: Bash(plasticity *)
 ---
 
+Run every `plasticity` command below with the `--db` prefix given at session
+start (`plasticity --db '...'`), so it uses this session's memory.
+
 Search long-term memory for: $ARGUMENTS
 
 Run `plasticity recall "$ARGUMENTS" --session <SESSION_ID>` (the session ID

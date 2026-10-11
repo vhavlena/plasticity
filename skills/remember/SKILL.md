@@ -6,6 +6,9 @@ disable-model-invocation: true
 allowed-tools: Bash(plasticity *)
 ---
 
+Run every `plasticity` command below with the `--db` prefix given at session
+start (`plasticity --db '...'`), so it uses this session's memory.
+
 Store the following in long-term memory: $ARGUMENTS
 
 1. Decide the neuron type(s) (decision, fact, procedure, rationale, concept,

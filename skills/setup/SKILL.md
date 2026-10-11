@@ -5,6 +5,9 @@ disable-model-invocation: true
 allowed-tools: Bash(plasticity *)
 ---
 
+Run every `plasticity` command below with the `--db` prefix given at session
+start (`plasticity --db '...'`), so it uses this session's memory.
+
 Check the plasticity installation and help the user configure it:
 
 1. Run `plasticity stats`. The first run builds the engine from source (needs Go

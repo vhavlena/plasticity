@@ -12,7 +12,10 @@ unused links fade. Relevant neurons are injected automatically with every user
 prompt inside `<plasticity-memories>`. Your session ID was given at session
 start ("This session's ID is ..."); pass it as `--session` below.
 
-All commands print JSON. The CLI is `plasticity` (on PATH in Bash).
+All commands print JSON. The CLI is `plasticity` (on PATH in Bash). Run it with
+the `--db` prefix given at session start (`plasticity --db '...'`): Bash commands
+do not see the plugin's scope option, so without it they may use another graph.
+Every `plasticity` below stands for that prefix.
 
 ## 1. Store durable knowledge
 

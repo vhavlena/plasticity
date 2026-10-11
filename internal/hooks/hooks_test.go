@@ -67,7 +67,8 @@ func TestConfigFromEnv(t *testing.T) {
 
 func TestSessionStartAndPrompt(t *testing.T) {
 	e := newEngine(t)
-	cfg := Config{Scope: "global", RecallLimit: 5, Reflect: true, Log: true, Embeddings: "off", ContextBudget: 3000}
+	cfg := Config{Scope: "global", RecallLimit: 5, Reflect: true, Log: true, Embeddings: "off", ContextBudget: 3000, DB: "/h/it's/graph.db"}
+	cli := `plasticity --db '/h/it'\''s/graph.db'`
 	sqlite := add(t, e, "Use SQLite WAL for storage", "many processes read while one writes")
 	add(t, e, "Cooking pasta", "boil water")
 
@@ -76,7 +77,7 @@ func TestSessionStartAndPrompt(t *testing.T) {
 		t.Fatalf("session start: %v %+v", err, out)
 	}
 	ctx := out.Specific.AdditionalContext
-	for _, want := range []string{"2 neurons", "S1", "plasticity add", "plasticity used --session S1"} {
+	for _, want := range []string{"2 neurons", "S1", cli + " recall", cli + " add", cli + " used --session S1"} {
 		if !strings.Contains(ctx, want) {
 			t.Fatalf("session-start context lacks %q:\n%s", want, ctx)
 		}
@@ -87,7 +88,7 @@ func TestSessionStartAndPrompt(t *testing.T) {
 		t.Fatalf("prompt: %v %+v", err, out)
 	}
 	ctx = out.Specific.AdditionalContext
-	if !strings.Contains(ctx, sqlite) || !strings.Contains(ctx, "Why: because") || strings.Contains(ctx, "pasta") {
+	if !strings.Contains(ctx, sqlite) || !strings.Contains(ctx, "Why: because") || strings.Contains(ctx, "pasta") || !strings.Contains(ctx, cli+" used --session S1") {
 		t.Fatalf("injected context:\n%s", ctx)
 	}
 	if out, _ := Prompt(e, Input{SessionID: "S1", Prompt: "/compact"}, "/repo", cfg); out != nil {
@@ -112,18 +113,18 @@ func TestFormatMemoriesBudget(t *testing.T) {
 		r.Hits = append(r.Hits, engine.RecallHit{IsSeed: true, Node: &model.Node{ID: strings.Repeat("X", 26), Type: model.TypeFact,
 			Title: "a fairly long title for budget testing", Content: strings.Repeat("content ", 40)}})
 	}
-	text := FormatMemories(r, "S", 1500)
+	text := FormatMemories(r, "S", "plasticity", 1500)
 	if len(text) > 1500 || !strings.HasSuffix(text, "</plasticity-memories>") || strings.Count(text, "- [") < 2 {
 		t.Fatalf("budget not respected (%d chars):\n%s", len(text), text)
 	}
-	if FormatMemories(&engine.RecallResult{}, "S", 1500) != "" {
+	if FormatMemories(&engine.RecallResult{}, "S", "plasticity", 1500) != "" {
 		t.Fatal("no hits must give no context")
 	}
 }
 
 func TestStopNudge(t *testing.T) {
 	e := newEngine(t)
-	cfg := Config{Reflect: true}
+	cfg := Config{Reflect: true, DB: "/h/graph.db"}
 	e.StartSession("S", "", "startup")
 	few := transcript(t, [2]string{"Read", "a.go"})
 	if out, _ := Stop(e, Input{SessionID: "S", TranscriptPath: few}, cfg); out != nil {
@@ -138,7 +139,7 @@ func TestStopNudge(t *testing.T) {
 		t.Fatal("must not nudge while already continuing from a stop hook")
 	}
 	out, err := Stop(e, Input{SessionID: "S", TranscriptPath: many}, cfg)
-	if err != nil || out == nil || out.Decision != "block" || !strings.Contains(out.Reason, "--session S") {
+	if err != nil || out == nil || out.Decision != "block" || !strings.Contains(out.Reason, "plasticity --db '/h/graph.db' add") || !strings.Contains(out.Reason, "--session S") {
 		t.Fatalf("expected nudge: %v %+v", err, out)
 	}
 	if out, _ := Stop(e, Input{SessionID: "S", TranscriptPath: many}, cfg); out != nil {

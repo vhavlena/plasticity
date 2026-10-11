@@ -866,6 +866,13 @@ func (t *Tx) EndSession(id, episodeID string, at time.Time) error {
 	return err
 }
 
+// SetSessionEpisode records the session's episode neuron, leaving the
+// session open.
+func (t *Tx) SetSessionEpisode(id, episodeID string) error {
+	_, err := t.tx.Exec(`UPDATE sessions SET episode_id = ? WHERE id = ?`, episodeID, id)
+	return err
+}
+
 // CountEndedSessions returns how many sessions have ended.
 func (t *Tx) CountEndedSessions() (int, error) {
 	var n int

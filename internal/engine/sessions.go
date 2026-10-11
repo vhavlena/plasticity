@@ -232,7 +232,7 @@ func (e *Engine) AddNodeChecked(n *model.Node, opt AddOptions) (*AddResult, erro
 			return res, nil
 		}
 	}
-	if err := e.insertNodes([]*model.Node{n}, []*nodeVector{vec}); err != nil {
+	if err := e.insertNodes([]*model.Node{n}, []*nodeVector{vec}, nil); err != nil {
 		return nil, err
 	}
 	if opt.Session != "" {
@@ -413,8 +413,22 @@ func (e *Engine) EndSession(session string, files []string) (*EpisodeReport, err
 			if s.Project != "" {
 				ep.Tags = []string{"project:" + s.Project}
 			}
-			if err := e.AddNodes([]*model.Node{ep}); err != nil {
+			// Record the episode on the session in the same transaction:
+			// if the hook is killed before the session is closed, the next
+			// EndSession refreshes this episode instead of adding another.
+			if err := prepareNodes([]*model.Node{ep}); err != nil {
 				return nil, err
+			}
+			vec := e.embedNode(context.Background(), ep)
+			if err := e.insertNodes([]*model.Node{ep}, []*nodeVector{vec}, func(tx *store.Tx) error {
+				return tx.SetSessionEpisode(session, ep.ID)
+			}); err != nil {
+				return nil, err
+			}
+			if e.afterEpisode != nil {
+				if err := e.afterEpisode(); err != nil {
+					return nil, err
+				}
 			}
 		} else {
 			rep.Updated = true

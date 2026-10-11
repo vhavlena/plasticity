@@ -46,7 +46,7 @@ func (a *app) hookCmd() *cobra.Command {
 		}),
 		handler("session-end", func(e *engine.Engine, in hooks.Input, project string, _ hooks.Config) (any, error) {
 			_, err := hooks.SessionEnd(e, in, project)
-			return nil, err // runs async: nothing to tell Claude
+			return nil, err // SessionEnd output is not shown to Claude
 		}),
 		handler("setup", func(e *engine.Engine, _ hooks.Input, _ string, cfg hooks.Config) (any, error) {
 			status, err := hooks.Setup(context.Background(), e, cfg, paths.Home())
@@ -72,6 +72,7 @@ func (a *app) runHook(cmd *cobra.Command, run func(*engine.Engine, hooks.Input, 
 		a.dbPath = paths.DB(in.Cwd) // the session's project, not the hook's cwd
 	}
 	cfg := hooks.ConfigFromEnv()
+	cfg.DB = a.dbPath
 	var opts []engine.Option
 	if !cfg.Log {
 		opts = append(opts, engine.WithoutLog())

@@ -57,6 +57,24 @@ type Config struct {
 	// ContextBudget caps the injected characters per prompt (Claude Code
 	// truncates additional context above 10,000 characters).
 	ContextBudget int
+	// DB is the graph the hook opened. Commands Claude runs through Bash see
+	// neither the plugin options nor the session's cwd, so the commands the
+	// hooks suggest name this graph explicitly (see CLI).
+	DB string
+}
+
+// CLI returns the command prefix for the commands the hooks suggest to
+// Claude: plasticity --db '<DB>', or plain plasticity without a DB.
+func (c Config) CLI() string {
+	if c.DB == "" {
+		return "plasticity"
+	}
+	return "plasticity --db " + shellQuote(c.DB)
+}
+
+// shellQuote quotes s as one POSIX shell word.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // ConfigFromEnv reads CLAUDE_PLUGIN_OPTION_<KEY> (as declared or upper-case),
@@ -132,18 +150,19 @@ func SessionStart(e *engine.Engine, in Input, project string, cfg Config) (*Outp
 	} else if cfg.Embeddings != "off" {
 		search = "keyword search (semantic search is being set up in the background)"
 	}
-	id := in.SessionID
+	id, cli := in.SessionID, cfg.CLI()
 	text := fmt.Sprintf(`Plasticity long-term memory is active: %d neurons, %s scope, %s.
 This session's ID is %s.
+Run every plasticity command as %s ... (it selects this session's memory).
 - Memories relevant to each prompt are injected automatically.
 - Recall more yourself when that context is missing: before a design decision, when starting
   work in an unfamiliar area, when stuck on an error, before re-investigating a problem:
-  plasticity recall "<specific question or error>" --session %s
+  %s recall "<specific question or error>" --session %s
 - Store durable knowledge (decisions with rationale, root causes, working procedures, preferences):
-  plasticity add -t decision|fact|procedure|concept|rationale|question --title "..." -c "..." -r "why" --session %s
+  %s add -t decision|fact|procedure|concept|rationale|question --title "..." -c "..." -r "why" --session %s
 - Report memories you actually used (also ones you found via plasticity search/recall):
-  plasticity used --session %s ID [ID...]
-Use the plasticity:memory skill for guidance.`, st.Nodes, cfg.Scope, search, id, id, id, id)
+  %s used --session %s ID [ID...]
+Use the plasticity:memory skill for guidance.`, st.Nodes, cfg.Scope, search, id, cli, cli, id, cli, id, cli, id)
 	return contextOutput("SessionStart", text), nil
 }
 
@@ -168,7 +187,7 @@ func Prompt(e *engine.Engine, in Input, project string, cfg Config) (*Output, er
 		return nil, err
 	}
 	latency := time.Since(start)
-	text := FormatMemories(r, in.SessionID, cfg.ContextBudget)
+	text := FormatMemories(r, in.SessionID, cfg.CLI(), cfg.ContextBudget)
 	e.LogRecall(in.SessionID, engine.RecallSourcePrompt, in.Prompt, r, latency, len(text))
 	if text == "" {
 		return nil, nil
@@ -177,14 +196,14 @@ func Prompt(e *engine.Engine, in Input, project string, cfg Config) (*Output, er
 }
 
 // FormatMemories renders recalled memories as compact context within budget
-// characters ("" if there are none).
-func FormatMemories(r *engine.RecallResult, session string, budget int) string {
+// characters ("" if there are none); cli is the command prefix (Config.CLI).
+func FormatMemories(r *engine.RecallResult, session, cli string, budget int) string {
 	if len(r.Hits) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "<plasticity-memories session=%q>\nPossibly relevant memories (verify before relying on them):\n", session)
-	footer := fmt.Sprintf("If any helped, report them: plasticity used --session %s ID...\n</plasticity-memories>", session)
+	footer := fmt.Sprintf("If any helped, report them: %s used --session %s ID...\n</plasticity-memories>", cli, session)
 	for _, h := range r.Hits {
 		n := h.Node
 		line := fmt.Sprintf("- [%s] %s: %s", n.ID, n.Type, truncate(n.Title, 120))
@@ -209,12 +228,12 @@ func FormatMemories(r *engine.RecallResult, session string, budget int) string {
 
 // nudgeReason is the Stop-hook message asking Claude to consolidate the
 // session into memory.
-func nudgeReason(session string) string {
+func nudgeReason(session, cli string) string {
 	return fmt.Sprintf(`Before finishing, update long-term memory (plasticity) if this session produced anything worth keeping:
 - durable knowledge (decisions with rationale, root causes, working procedures, user preferences):
-  plasticity add -t <type> --title "..." -c "..." -r "why" --session %s
-- memories that helped: plasticity used --session %s ID [ID...]
-If nothing is worth keeping, simply finish; you will not be asked again in this session.`, session, session)
+  %s add -t <type> --title "..." -c "..." -r "why" --session %s
+- memories that helped: %s used --session %s ID [ID...]
+If nothing is worth keeping, simply finish; you will not be asked again in this session.`, cli, session, cli, session)
 }
 
 // Stop asks Claude, at most once per session and only after substantive
@@ -231,7 +250,7 @@ func Stop(e *engine.Engine, in Input, cfg Config) (*Output, error) {
 	if err != nil || !ok {
 		return nil, err
 	}
-	return &Output{Decision: "block", Reason: nudgeReason(in.SessionID)}, nil
+	return &Output{Decision: "block", Reason: nudgeReason(in.SessionID, cfg.CLI())}, nil
 }
 
 // SessionEnd creates the session's episode neuron from the transcript.

@@ -30,6 +30,10 @@ type Engine struct {
 	noEmbed  bool           // WithoutEmbeddings: lexical seeding only
 	noLog    bool           // WithoutLog: no event log
 
+	// afterEpisode, if set, runs in EndSession right after the episode is
+	// stored (tests: simulates the hook being killed at that point).
+	afterEpisode func() error
+
 	// Warnings collects non-fatal problems (e.g. an unreachable embedder)
 	// for the caller to report.
 	Warnings []string
@@ -107,7 +111,7 @@ func (e *Engine) AddNodes(nodes []*model.Node) error {
 	for i, n := range nodes {
 		vecs[i] = e.embedNode(context.Background(), n) // outside the write transaction
 	}
-	return e.insertNodes(nodes, vecs)
+	return e.insertNodes(nodes, vecs, nil)
 }
 
 // prepareNodes assigns IDs and timestamps and validates.
@@ -125,8 +129,8 @@ func prepareNodes(nodes []*model.Node) error {
 }
 
 // insertNodes stores prepared nodes and their (optional) vectors in one
-// transaction.
-func (e *Engine) insertNodes(nodes []*model.Node, vecs []*nodeVector) error {
+// transaction, together with then (if not nil).
+func (e *Engine) insertNodes(nodes []*model.Node, vecs []*nodeVector, then func(*store.Tx) error) error {
 	return e.st.Write(func(tx *store.Tx) error {
 		tick, err := tx.Tick()
 		if err != nil {
@@ -142,6 +146,9 @@ func (e *Engine) insertNodes(nodes []*model.Node, vecs []*nodeVector) error {
 					return err
 				}
 			}
+		}
+		if then != nil {
+			return then(tx)
 		}
 		return nil
 	})

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -133,6 +134,36 @@ func TestEndSessionCreatesEpisode(t *testing.T) {
 	f.e.StartSession("empty", "", "startup")
 	if rep, _ := f.e.EndSession("empty", nil); rep.Episode != nil {
 		t.Fatal("episode for an empty session")
+	}
+}
+
+func TestEndSessionKilledAfterEpisode(t *testing.T) {
+	f := newFixture(t)
+	f.e.StartSession("S", "/repo", "startup")
+	f.e.NotePrompt("S", "/repo", "Why did we choose SQLite over Badger?")
+	f.e.Used("S", []string{f.ids["sqlite"]})
+	f.e.afterEpisode = func() error { return errors.New("killed") }
+	if _, err := f.e.EndSession("S", nil); err == nil {
+		t.Fatal("expected the simulated kill")
+	}
+	s, _ := f.e.Session("S")
+	if s.EpisodeID == "" || !s.EndedAt.IsZero() {
+		t.Fatalf("after kill: %+v", s)
+	}
+	// The abandoned session is closed later: same episode, no duplicate.
+	f.e.afterEpisode = nil
+	rep, err := f.e.EndSession("S", nil)
+	if err != nil || rep.Episode == nil || rep.Episode.ID != s.EpisodeID {
+		t.Fatalf("closing again: %v %+v", err, rep)
+	}
+	eps := 0
+	for _, h := range f.recall("why sqlite badger session", "").Hits {
+		if h.Node.Type == model.TypeEpisode {
+			eps++
+		}
+	}
+	if st, _ := f.e.Stats(); eps != 1 || st.Nodes != len(f.ids)+1 {
+		t.Fatalf("episodes: %d recalled, %d nodes for %d fixture nodes", eps, st.Nodes, len(f.ids))
 	}
 }
 
