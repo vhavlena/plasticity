@@ -10,6 +10,7 @@ import (
 	"github.com/vhavlena/plasticity/internal/model"
 	"github.com/vhavlena/plasticity/internal/plasticity"
 	"github.com/vhavlena/plasticity/internal/store"
+	"github.com/vhavlena/plasticity/internal/viz"
 )
 
 // batchSize keeps each consolidation write transaction short so concurrent
@@ -170,10 +171,11 @@ type ExportEdge struct {
 	EffectiveWeight float64 `json:"effective_weight"`
 }
 
-// Export writes the whole graph as "json" or "dot".
+// Export writes the whole graph as "json", "dot" or "html" (an interactive,
+// self-contained visualization).
 func (e *Engine) Export(w io.Writer, format string) error {
-	if format != "json" && format != "dot" {
-		return fmt.Errorf("unknown export format %q (json|dot)", format)
+	if format != "json" && format != "dot" && format != "html" {
+		return fmt.Errorf("unknown export format %q (json|dot|html)", format)
 	}
 	now := timestamp()
 	nodes, edges, err := e.Snapshot()
@@ -184,6 +186,9 @@ func (e *Engine) Export(w io.Writer, format string) error {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		return enc.Encode(map[string]any{"exported_at": now, "nodes": nodes, "edges": edges})
+	}
+	if format == "html" {
+		return viz.Write(w, map[string]any{"exported_at": now, "nodes": nodes, "edges": edges})
 	}
 	return writeDOT(w, nodes, edges)
 }

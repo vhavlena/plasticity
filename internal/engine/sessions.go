@@ -127,6 +127,62 @@ func (e *Engine) Session(id string) (*store.Session, error) {
 	return s, err
 }
 
+// NodeRef names a neuron in listings.
+type NodeRef struct {
+	ID    string         `json:"id"`
+	Type  model.NodeType `json:"type"`
+	Title string         `json:"title"`
+}
+
+// SessionSummary is a past session with the neurons it used and created.
+type SessionSummary struct {
+	*store.Session
+	Used    []NodeRef `json:"used"`
+	Created []NodeRef `json:"created"`
+}
+
+// Sessions lists up to limit sessions, most recent first (optionally only
+// one project's), with the neurons each used and created: the history of
+// work on the graph, kept outside the graph itself.
+func (e *Engine) Sessions(project string, limit int) ([]SessionSummary, error) {
+	out := []SessionSummary{}
+	err := e.st.Read(func(tx *store.Tx) error {
+		ss, err := tx.ListSessions(project, limit)
+		if err != nil {
+			return err
+		}
+		refs := func(session, role string) ([]NodeRef, error) {
+			ids, err := tx.SessionNodes(session, role)
+			if err != nil {
+				return nil, err
+			}
+			nodes, err := tx.GetNodes(ids)
+			if err != nil {
+				return nil, err
+			}
+			r := []NodeRef{}
+			for _, id := range ids {
+				if n := nodes[id]; n != nil {
+					r = append(r, NodeRef{ID: n.ID, Type: n.Type, Title: n.Title})
+				}
+			}
+			return r, nil
+		}
+		for _, s := range ss {
+			sum := SessionSummary{Session: s}
+			if sum.Used, err = refs(s.ID, RoleUsed); err != nil {
+				return err
+			}
+			if sum.Created, err = refs(s.ID, RoleCreated); err != nil {
+				return err
+			}
+			out = append(out, sum)
+		}
+		return nil
+	})
+	return out, err
+}
+
 // StartSession registers a session (idempotent) with its transcript path
 // and logs it.
 func (e *Engine) StartSession(id, project, source string, transcript ...string) error {
@@ -406,13 +462,13 @@ type EpisodeReport struct {
 // process has given one in the meantime.
 var errSessionClosing = errors.New("session is being closed by another process")
 
-// EndSession closes a session: it creates the session's episode neuron
-// (first prompt as title, prompts and edited files as content), links it to
-// the neurons the session used or created, and consolidates every
-// ConsolidateEverySessions sessions. Sessions without prompts get no episode.
-// A session that was resumed after being closed gets its episode refreshed
-// with the later prompts, files and neurons.
-func (e *Engine) EndSession(session string, files []string) (*EpisodeReport, error) {
+// EndSession closes a session and consolidates every ConsolidateEverySessions
+// sessions. With episode set, it also creates the session's episode neuron
+// (first prompt as title, prompts and edited files as content) and links it
+// to the neurons the session used or created. Sessions without prompts get no
+// episode. A session that was resumed after being closed gets its episode
+// refreshed with the later prompts, files and neurons.
+func (e *Engine) EndSession(session string, files []string, episode bool) (*EpisodeReport, error) {
 	s, err := e.Session(session)
 	if err != nil || s == nil {
 		return nil, err
@@ -429,7 +485,7 @@ func (e *Engine) EndSession(session string, files []string) (*EpisodeReport, err
 			return nil, err
 		}
 	}
-	if s.Prompts > 0 {
+	if episode && s.Prompts > 0 {
 		content, err := e.episodeContent(s, files)
 		if err != nil {
 			return nil, err

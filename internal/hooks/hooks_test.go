@@ -56,15 +56,19 @@ func transcript(t *testing.T, tools ...[2]string) string {
 }
 
 func TestConfigFromEnv(t *testing.T) {
-	for _, k := range []string{"PLASTICITY_RECALL_LIMIT", "PLASTICITY_REFLECT", "PLASTICITY_EMBEDDINGS", "PLASTICITY_SCOPE", "PLASTICITY_LOG"} {
+	for _, k := range []string{"PLASTICITY_RECALL_LIMIT", "PLASTICITY_REFLECT", "PLASTICITY_EMBEDDINGS", "PLASTICITY_SCOPE", "PLASTICITY_LOG", "PLASTICITY_EPISODES"} {
 		t.Setenv(k, "")
 	}
 	t.Setenv("CLAUDE_PLUGIN_OPTION_RECALL_LIMIT", "4")
 	t.Setenv("CLAUDE_PLUGIN_OPTION_reflect", "false")
 	t.Setenv("PLASTICITY_EMBEDDINGS", "off")
 	c := ConfigFromEnv()
-	if c.RecallLimit != 4 || c.Reflect || c.Embeddings != "off" || !c.Log || c.Scope != "global" {
+	if c.RecallLimit != 4 || c.Reflect || c.Embeddings != "off" || !c.Log || c.Scope != "global" || c.Episodes {
 		t.Fatalf("config: %+v", c)
+	}
+	t.Setenv("CLAUDE_PLUGIN_OPTION_EPISODES", "true")
+	if !ConfigFromEnv().Episodes {
+		t.Fatal("episodes option ignored")
 	}
 }
 
@@ -176,13 +180,48 @@ func TestTranscriptParsingAndSessionEnd(t *testing.T) {
 	e.StartSession("S", "/repo", "startup")
 	e.NotePrompt("S", "/repo", "refactor the storage layer please")
 	e.Used("S", []string{id})
-	rep, err := SessionEnd(e, Input{SessionID: "S", TranscriptPath: path}, "/repo")
+	rep, err := SessionEnd(e, Input{SessionID: "S", TranscriptPath: path}, "/repo", episodes)
 	if err != nil || rep.Episode == nil || !strings.Contains(rep.Episode.Content, "sub/b.go") || rep.Links != 1 {
 		t.Fatalf("session end: %v %+v", err, rep)
 	}
-	rep, err = SessionEnd(e, Input{SessionID: "unknown", TranscriptPath: "/nope"}, "/repo")
+	rep, err = SessionEnd(e, Input{SessionID: "unknown", TranscriptPath: "/nope"}, "/repo", episodes)
 	if err != nil || rep != nil {
 		t.Fatalf("unknown session: %v %+v", err, rep)
+	}
+}
+
+var episodes = Config{Episodes: true}
+
+func TestEpisodesOff(t *testing.T) {
+	e := newEngine(t)
+	id := add(t, e, "Use SQLite WAL for storage", "x")
+	e.StartSession("S", "/repo", "startup")
+	e.NotePrompt("S", "/repo", "refactor the sqlite storage layer please")
+	e.Used("S", []string{id})
+	rep, err := SessionEnd(e, Input{SessionID: "S"}, "/repo", Config{})
+	if err != nil || rep.Episode != nil {
+		t.Fatalf("episode created although disabled: %v %+v", err, rep)
+	}
+	if s, _ := e.Session("S"); s.EndedAt.IsZero() || s.EpisodeID != "" {
+		t.Fatalf("session not closed: %+v", s)
+	}
+	ss, err := e.Sessions("", 10)
+	if err != nil || len(ss) != 1 || len(ss[0].Used) != 1 || ss[0].Used[0].ID != id || ss[0].FirstPrompt == "" {
+		t.Fatalf("session history: %v %+v", err, ss)
+	}
+
+	// Episodes that exist (created while enabled) are never injected.
+	e.StartSession("T", "/repo", "startup")
+	e.NotePrompt("T", "/repo", "sqlite storage layer refactoring")
+	if rep, err := SessionEnd(e, Input{SessionID: "T"}, "/repo", episodes); err != nil || rep.Episode == nil {
+		t.Fatalf("episode: %v %+v", err, rep)
+	}
+	out, err := Prompt(e, Input{SessionID: "U", Prompt: "sqlite storage layer refactoring"}, "/repo", Config{RecallLimit: 5, ContextBudget: 3000})
+	if err != nil || out == nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	if ctx := out.Specific.AdditionalContext; strings.Contains(ctx, "episode:") || !strings.Contains(ctx, id) {
+		t.Fatalf("episode injected:\n%s", ctx)
 	}
 }
 
@@ -304,7 +343,7 @@ func TestCloseAbandonedSkipsFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close()
-	cfg := Config{Embeddings: "off", SessionIdle: -time.Hour}
+	cfg := Config{Embeddings: "off", SessionIdle: -time.Hour, Episodes: true}
 	out, err := SessionStart(e, Input{SessionID: "new", Source: "startup"}, "/repo", cfg)
 	if err != nil || out == nil || !strings.Contains(out.Specific.AdditionalContext, "This session's ID is new") {
 		t.Fatalf("session start must not depend on closing old sessions: %v %+v", err, out)
@@ -326,7 +365,7 @@ func TestSessionStartClosesAbandonedSessions(t *testing.T) {
 	e := newEngine(t)
 	id := add(t, e, "Use SQLite WAL for storage", "x")
 	tr := transcript(t, [2]string{"Edit", "/repo/x.go"})
-	cfg := Config{Embeddings: "off"}
+	cfg := Config{Embeddings: "off", Episodes: true}
 	SessionStart(e, Input{SessionID: "old", TranscriptPath: tr}, "/repo", cfg)
 	Prompt(e, Input{SessionID: "old", Prompt: "tell me about sqlite storage"}, "/repo", Config{RecallLimit: 5, ContextBudget: 3000})
 	e.Used("old", []string{id})
@@ -361,7 +400,7 @@ func TestSessionStartClosesAbandonedSessions(t *testing.T) {
 	}
 	later := add(t, e, "Vacuum weekly", "y")
 	e.Used("old", []string{later})
-	rep, err := SessionEnd(e, Input{SessionID: "old", TranscriptPath: tr}, "/repo")
+	rep, err := SessionEnd(e, Input{SessionID: "old", TranscriptPath: tr}, "/repo", cfg)
 	if err != nil || rep.Episode == nil || !rep.Updated || rep.Episode.ID != s.EpisodeID {
 		t.Fatalf("resumed session end: %v %+v", err, rep)
 	}
@@ -375,7 +414,7 @@ func TestSessionStartClosesAbandonedSessions(t *testing.T) {
 		t.Fatal("resumed session not closed again")
 	}
 	// Ending it twice changes nothing.
-	if rep, err := SessionEnd(e, Input{SessionID: "old"}, "/repo"); err != nil || rep.Episode != nil {
+	if rep, err := SessionEnd(e, Input{SessionID: "old"}, "/repo", cfg); err != nil || rep.Episode != nil {
 		t.Fatalf("second end: %v %+v", err, rep)
 	}
 }

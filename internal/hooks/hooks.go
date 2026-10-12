@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/vhavlena/plasticity/internal/engine"
+	"github.com/vhavlena/plasticity/internal/model"
 )
 
 // Input is the subset of the hook input JSON used by the handlers.
@@ -50,9 +51,13 @@ type Config struct {
 	Reflect     bool   // Stop-hook nudge to store/report memories
 	Log         bool   // event log
 	Embeddings  string // auto | off
+	// Episodes: create an episode neuron for each session when it ends.
+	// Session history is kept in the database either way (plasticity sessions).
+	Episodes bool
 	// SessionIdle: a session idle this long without a SessionEnd hook is
-	// closed (its episode created) at the next session start. Resuming it
-	// later reopens it, and its episode is refreshed when it ends again.
+	// closed (its episode created, if enabled) at the next session start.
+	// Resuming it later reopens it, and its episode is refreshed when it ends
+	// again.
 	SessionIdle time.Duration
 	// ContextBudget caps the injected characters per prompt (Claude Code
 	// truncates additional context above 10,000 characters).
@@ -113,6 +118,9 @@ func ConfigFromEnv() Config {
 	if v, ok := get("log"); ok {
 		c.Log = truthy(v)
 	}
+	if v, ok := get("episodes"); ok {
+		c.Episodes = truthy(v)
+	}
 	if v, ok := get("embeddings"); ok {
 		c.Embeddings = strings.ToLower(v)
 	}
@@ -162,7 +170,8 @@ Use the plasticity:memory skill for guidance.`, st.Nodes, cfg.Scope, search, id,
 }
 
 // CloseAbandoned closes up to limit sessions that ended without a SessionEnd
-// hook (crash, kill, hook timeout), so their episodes are not lost. It runs
+// hook (crash, kill, hook timeout), so their episodes (if enabled) are not
+// lost. It runs
 // in the async setup hook: closing embeds and may consolidate, which must
 // not delay or block the session-start context. A session that fails to
 // close is logged and skipped (it is retried at the next session start).
@@ -174,7 +183,7 @@ func CloseAbandoned(e *engine.Engine, cfg Config, limit int) (int, error) {
 	closed := 0
 	for _, s := range stale {
 		files, _ := EditedFiles(s.Transcript, s.Project)
-		if _, err := e.EndSession(s.ID, files); err != nil {
+		if _, err := e.EndSession(s.ID, files, cfg.Episodes); err != nil {
 			e.Log(s.ID, engine.EventError, map[string]string{"op": "close-session", "error": err.Error()})
 			continue
 		}
@@ -199,7 +208,11 @@ func Prompt(e *engine.Engine, in Input, project string, cfg Config) (*Output, er
 		return nil, nil
 	}
 	start := time.Now()
-	r, err := e.Recall(engine.RecallRequest{Query: in.Prompt, Session: in.SessionID, Limit: cfg.RecallLimit})
+	// Episodes quote raw prompts: they match many queries lexically and would
+	// crowd knowledge out of the few injected slots. They stay reachable
+	// through explicit recall and search.
+	r, err := e.Recall(engine.RecallRequest{Query: in.Prompt, Session: in.SessionID, Limit: cfg.RecallLimit,
+		ExcludeTypes: []model.NodeType{model.TypeEpisode}})
 	if err != nil {
 		return nil, err
 	}
@@ -270,13 +283,17 @@ func Stop(e *engine.Engine, in Input, cfg Config) (*Output, error) {
 	return &Output{Decision: "block", Reason: nudgeReason(in.SessionID, cfg.CLI())}, nil
 }
 
-// SessionEnd creates the session's episode neuron from the transcript.
-func SessionEnd(e *engine.Engine, in Input, project string) (*engine.EpisodeReport, error) {
-	files, err := EditedFiles(in.TranscriptPath, project)
-	if err != nil {
-		files = nil // a missing transcript must not lose the episode
+// SessionEnd closes the session and, if enabled, creates its episode neuron
+// from the transcript.
+func SessionEnd(e *engine.Engine, in Input, project string, cfg Config) (*engine.EpisodeReport, error) {
+	var files []string
+	if cfg.Episodes {
+		var err error
+		if files, err = EditedFiles(in.TranscriptPath, project); err != nil {
+			files = nil // a missing transcript must not lose the episode
+		}
 	}
-	return e.EndSession(in.SessionID, files)
+	return e.EndSession(in.SessionID, files, cfg.Episodes)
 }
 
 func truncate(s string, n int) string {

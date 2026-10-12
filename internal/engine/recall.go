@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"math"
+	"slices"
 	"sort"
 
 	"github.com/oklog/ulid/v2"
@@ -66,6 +67,9 @@ type RecallRequest struct {
 	HopDecay  float64
 	Rerank    string // "" or "ppr"
 	NoRecord  bool   // do not record accesses or traces
+	// ExcludeTypes leaves neurons of these types out of the hits; they
+	// still carry activation to their neighbors.
+	ExcludeTypes []model.NodeType
 }
 
 // RecallHit is one recalled neuron.
@@ -188,7 +192,7 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 		}
 		for _, id := range ids {
 			n, a := nodes[id], spread.Activations[id]
-			if n == nil {
+			if n == nil || slices.Contains(req.ExcludeTypes, n.Type) {
 				continue
 			}
 			b := plasticity.BaseLevel(acc[id], tick, p.ActrDecay)

@@ -3,11 +3,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -103,7 +107,7 @@ func newRoot(out io.Writer, in io.Reader) *cobra.Command {
 		a.initCmd(), a.addCmd(), a.usedCmd(), a.noteCmd(), a.logCmd(), a.hookCmd(), a.getCmd(), a.updateCmd(), a.deleteCmd(),
 		a.linkCmd(), a.unlinkCmd(), a.searchCmd(), a.recallCmd(),
 		a.reinforceCmd(), a.feedbackCmd(), a.consolidateCmd(),
-		a.statsCmd(), a.exportCmd(), a.paramsCmd(), a.embedCmd(), a.evalCmd(),
+		a.statsCmd(), a.sessionsCmd(), a.exportCmd(), a.vizCmd(), a.paramsCmd(), a.embedCmd(), a.evalCmd(),
 	)
 	return root
 }
@@ -517,6 +521,22 @@ func (a *app) statsCmd() *cobra.Command {
 	}
 }
 
+func (a *app) sessionsCmd() *cobra.Command {
+	var project string
+	var limit int
+	c := &cobra.Command{
+		Use:   "sessions",
+		Short: "List past Claude Code sessions with the neurons each used and created",
+		Args:  cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return a.with(func(e *engine.Engine) (any, error) { return e.Sessions(project, limit) })
+		},
+	}
+	c.Flags().StringVar(&project, "project", "", "only sessions of this project (git repository root)")
+	c.Flags().IntVarP(&limit, "limit", "n", 20, "maximum number of sessions, most recent first")
+	return c
+}
+
 func (a *app) exportCmd() *cobra.Command {
 	var format string
 	c := &cobra.Command{
@@ -532,8 +552,64 @@ func (a *app) exportCmd() *cobra.Command {
 			return e.Export(a.out, format)
 		},
 	}
-	c.Flags().StringVarP(&format, "format", "f", "json", "json|dot")
+	c.Flags().StringVarP(&format, "format", "f", "json", "json|dot|html")
 	return c
+}
+
+func (a *app) vizCmd() *cobra.Command {
+	var file string
+	var noOpen bool
+	c := &cobra.Command{
+		Use:   "viz",
+		Short: "Write an interactive HTML visualization of the graph and open it",
+		Long: "Write the whole graph as a self-contained HTML page (no network access needed)\n" +
+			"and open it in the browser. The default file sits next to the database.",
+		Args: cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error {
+			if file == "" {
+				file = strings.TrimSuffix(a.dbPath, filepath.Ext(a.dbPath)) + ".html"
+			}
+			return a.with(func(e *engine.Engine) (any, error) {
+				var buf bytes.Buffer
+				if err := e.Export(&buf, "html"); err != nil {
+					return nil, err
+				}
+				if err := os.WriteFile(file, buf.Bytes(), 0o600); err != nil {
+					return nil, err
+				}
+				abs, err := filepath.Abs(file)
+				if err != nil {
+					return nil, err
+				}
+				res := map[string]any{"file": abs, "opened": false}
+				if !noOpen {
+					if err := openBrowser(abs); err != nil {
+						fmt.Fprintln(os.Stderr, "warning: could not open a browser:", err)
+					} else {
+						res["opened"] = true
+					}
+				}
+				return res, nil
+			})
+		},
+	}
+	c.Flags().StringVarP(&file, "output", "o", "", "HTML file to write (default: the database path with .html)")
+	c.Flags().BoolVar(&noOpen, "no-open", false, "only write the file, do not open a browser")
+	return c
+}
+
+// openBrowser opens path with the platform's default handler.
+func openBrowser(path string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", path)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", path)
+	default:
+		cmd = exec.Command("xdg-open", path)
+	}
+	return cmd.Start()
 }
 
 func (a *app) paramsCmd() *cobra.Command {

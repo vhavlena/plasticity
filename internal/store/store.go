@@ -846,6 +846,40 @@ func (t *Tx) OpenSessionsBefore(before time.Time, limit int) ([]string, error) {
 	return ids, rows.Err()
 }
 
+// ListSessions returns up to limit sessions, most recently seen first,
+// optionally only those of one project.
+func (t *Tx) ListSessions(project string, limit int) ([]*Session, error) {
+	rows, err := t.tx.Query(`SELECT id FROM sessions WHERE ? = '' OR project = ? ORDER BY last_seen DESC, id LIMIT ?`,
+		project, project, limit)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]*Session, 0, len(ids))
+	for _, id := range ids {
+		s, err := t.GetSession(id)
+		if err != nil {
+			return nil, err
+		}
+		if s != nil {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
 // GetSession returns a session or nil if unknown.
 func (t *Tx) GetSession(id string) (*Session, error) {
 	var s Session

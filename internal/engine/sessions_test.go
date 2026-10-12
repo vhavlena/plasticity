@@ -99,7 +99,7 @@ func TestEndSessionCreatesEpisode(t *testing.T) {
 	f.e.NotePrompt("S", "/repo", "Why did we choose SQLite over Badger?")
 	f.e.NotePrompt("S", "/repo", "And how do hooks talk to it?")
 	f.e.Used("S", []string{f.ids["sqlite"], f.ids["hooks"]})
-	rep, err := f.e.EndSession("S", []string{"internal/store/store.go"})
+	rep, err := f.e.EndSession("S", []string{"internal/store/store.go"}, true)
 	if err != nil || rep.Episode == nil || rep.Links != 2 || rep.Consolidated == nil {
 		t.Fatalf("end session: %v %+v", err, rep)
 	}
@@ -108,7 +108,7 @@ func TestEndSessionCreatesEpisode(t *testing.T) {
 		!strings.Contains(ep.Content, "hooks talk") || !strings.Contains(ep.Content, "store.go") {
 		t.Fatalf("episode content: %+v", ep)
 	}
-	again, _ := f.e.EndSession("S", nil)
+	again, _ := f.e.EndSession("S", nil, true)
 	if again.Episode != nil {
 		t.Fatal("ending twice must not create a second episode")
 	}
@@ -133,7 +133,7 @@ func TestEndSessionCreatesEpisode(t *testing.T) {
 	}
 	// Sessions without prompts get no episode.
 	f.e.StartSession("empty", "", "startup")
-	if rep, _ := f.e.EndSession("empty", nil); rep.Episode != nil {
+	if rep, _ := f.e.EndSession("empty", nil, true); rep.Episode != nil {
 		t.Fatal("episode for an empty session")
 	}
 }
@@ -144,7 +144,7 @@ func TestEndSessionKilledAfterEpisode(t *testing.T) {
 	f.e.NotePrompt("S", "/repo", "Why did we choose SQLite over Badger?")
 	f.e.Used("S", []string{f.ids["sqlite"]})
 	f.e.afterEpisode = func() error { return errors.New("killed") }
-	if _, err := f.e.EndSession("S", nil); err == nil {
+	if _, err := f.e.EndSession("S", nil, true); err == nil {
 		t.Fatal("expected the simulated kill")
 	}
 	s, _ := f.e.Session("S")
@@ -153,7 +153,7 @@ func TestEndSessionKilledAfterEpisode(t *testing.T) {
 	}
 	// The abandoned session is closed later: same episode, no duplicate.
 	f.e.afterEpisode = nil
-	rep, err := f.e.EndSession("S", nil)
+	rep, err := f.e.EndSession("S", nil, true)
 	if err != nil || rep.Episode == nil || rep.Episode.ID != s.EpisodeID {
 		t.Fatalf("closing again: %v %+v", err, rep)
 	}

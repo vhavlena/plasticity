@@ -14,9 +14,9 @@ bin="$home/bin/plasticity-${version:-dev}"
 
 stale() {
 	[ ! -x "$bin" ] && return 0
-	# Rebuild if any source is newer than the binary (development checkouts,
+	# Rebuild if any source (including embedded assets) is newer than the binary (development checkouts,
 	# or an update that kept the version number).
-	[ -n "$(find "$root/go.mod" "$root/go.sum" "$root/cmd" "$root/internal" -newer "$bin" -name '*.go' -o -newer "$bin" -name 'go.*' 2>/dev/null | head -n 1)" ]
+	[ -n "$(find "$root/go.mod" "$root/go.sum" "$root/cmd" "$root/internal" -newer "$bin" -name '*.go' -o -newer "$bin" -name 'go.*' -o -newer "$bin" -name '*.html' 2>/dev/null | head -n 1)" ]
 }
 
 build() {
