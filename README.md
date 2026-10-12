@@ -31,8 +31,11 @@ For development: `claude --plugin-dir /path/to/plasticity`.
   reports teach the graph which knowledge belongs together.
 - **End of a task:** once per session, after substantive work, Claude is
   asked to store anything worth keeping.
-- **End of a session:** an `episode` neuron records the prompts and edited
-  files, linked to the knowledge the session used and created.
+- **End of a session:** the session is closed. Its history (first prompt,
+  the memories it used and created) is kept outside the graph and listed by
+  `plasticity sessions`. With the `episodes` option, an `episode` neuron also
+  records the prompts and edited files, linked to that knowledge; episodes
+  are never injected into prompts, only found by explicit recall and search.
 
 **Commands:** `/plasticity:remember <text>`, `/plasticity:recall <query>`,
 `/plasticity:status`, `/plasticity:graph` (interactive view of the graph
@@ -46,7 +49,8 @@ miss|noise|helped <what happened>` to record observations while evaluating.
 | `scope` | `global` | one memory for all projects, or `project` (one per git repository) |
 | `recall_limit` | 6 | memories injected per prompt |
 | `reflect` | true | end-of-task request to store or report memories |
-| `session_idle_hours` | 48 | a session left without a clean exit gets its episode after this idle time; resuming it later refreshes the episode |
+| `session_idle_hours` | 48 | a session left without a clean exit is closed after this idle time; resuming it later reopens it (and refreshes its episode) |
+| `episodes` | false | store each session as an `episode` neuron |
 | `embeddings` | `auto` | `auto` (local model), `ollama`, or `off` |
 | `log` | true | local event log (`plasticity eval report` summarizes it) |
 
@@ -100,6 +104,7 @@ concurrent hooks and sessions can share it. Every constant is tunable with
 go build -o plasticity ./cmd/plasticity
 go test -race ./...
 plasticity --help                           # full CLI
+plasticity sessions                         # past sessions with the memories they used and created
 plasticity viz                              # interactive HTML view of the graph (export -f html|json|dot)
 plasticity eval run SCENARIO.json           # offline evaluation of recall and learning
 plasticity eval report --since 168h         # how memory behaved in real sessions (+ your notes)

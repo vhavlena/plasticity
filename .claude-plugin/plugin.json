@@ -40,10 +40,16 @@
     "session_idle_hours": {
       "type": "number",
       "title": "Close idle sessions after (hours)",
-      "description": "A session idle this long without a clean exit gets its episode created at the next session start; resuming it later reopens it and refreshes the episode",
+      "description": "A session idle this long without a clean exit is closed at the next session start (and gets its episode, if enabled); resuming it later reopens it",
       "default": 48,
       "min": 1,
       "max": 720
+    },
+    "episodes": {
+      "type": "boolean",
+      "title": "Episode neurons",
+      "description": "Store each session as an episode neuron (its prompts and edited files) linked to the knowledge it used. Off by default: session history is kept outside the graph either way (plasticity sessions)",
+      "default": false
     },
     "embeddings": {
       "type": "string",

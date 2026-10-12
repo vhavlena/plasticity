@@ -44,8 +44,8 @@ func (a *app) hookCmd() *cobra.Command {
 		handler("stop", func(e *engine.Engine, in hooks.Input, _ string, cfg hooks.Config) (any, error) {
 			return hooks.Stop(e, in, cfg)
 		}),
-		handler("session-end", func(e *engine.Engine, in hooks.Input, project string, _ hooks.Config) (any, error) {
-			_, err := hooks.SessionEnd(e, in, project)
+		handler("session-end", func(e *engine.Engine, in hooks.Input, project string, cfg hooks.Config) (any, error) {
+			_, err := hooks.SessionEnd(e, in, project, cfg)
 			return nil, err // SessionEnd output is not shown to Claude
 		}),
 		handler("setup", func(e *engine.Engine, _ hooks.Input, _ string, cfg hooks.Config) (any, error) {

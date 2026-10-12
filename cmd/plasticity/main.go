@@ -107,7 +107,7 @@ func newRoot(out io.Writer, in io.Reader) *cobra.Command {
 		a.initCmd(), a.addCmd(), a.usedCmd(), a.noteCmd(), a.logCmd(), a.hookCmd(), a.getCmd(), a.updateCmd(), a.deleteCmd(),
 		a.linkCmd(), a.unlinkCmd(), a.searchCmd(), a.recallCmd(),
 		a.reinforceCmd(), a.feedbackCmd(), a.consolidateCmd(),
-		a.statsCmd(), a.exportCmd(), a.vizCmd(), a.paramsCmd(), a.embedCmd(), a.evalCmd(),
+		a.statsCmd(), a.sessionsCmd(), a.exportCmd(), a.vizCmd(), a.paramsCmd(), a.embedCmd(), a.evalCmd(),
 	)
 	return root
 }
@@ -519,6 +519,22 @@ func (a *app) statsCmd() *cobra.Command {
 			return a.with(func(e *engine.Engine) (any, error) { return e.Stats() })
 		},
 	}
+}
+
+func (a *app) sessionsCmd() *cobra.Command {
+	var project string
+	var limit int
+	c := &cobra.Command{
+		Use:   "sessions",
+		Short: "List past Claude Code sessions with the neurons each used and created",
+		Args:  cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return a.with(func(e *engine.Engine) (any, error) { return e.Sessions(project, limit) })
+		},
+	}
+	c.Flags().StringVar(&project, "project", "", "only sessions of this project (git repository root)")
+	c.Flags().IntVarP(&limit, "limit", "n", 20, "maximum number of sessions, most recent first")
+	return c
 }
 
 func (a *app) exportCmd() *cobra.Command {

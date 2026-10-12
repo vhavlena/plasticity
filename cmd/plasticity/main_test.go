@@ -446,25 +446,24 @@ func TestHookLifecycle(t *testing.T) {
 	for _, e := range evs {
 		kinds[e.Kind]++
 	}
-	for _, k := range []string{"session_start", "prompt", "recall", "nudge", "used", "add", "episode"} {
+	for _, k := range []string{"session_start", "prompt", "recall", "nudge", "used", "add"} {
 		if kinds[k] == 0 {
 			t.Errorf("no %s event: %v", k, kinds)
 		}
 	}
-	var r struct {
-		Hits []struct {
-			Node struct{ Type, Content string }
-		}
+	if kinds["episode"] != 0 {
+		t.Errorf("episode created although episodes are off by default: %v", kinds)
 	}
-	c.json(&r, "recall", "why", "did", "we", "choose", "sqlite", "storage", "--no-record")
-	foundEpisode := false
-	for _, h := range r.Hits {
-		if h.Node.Type == "episode" && strings.Contains(h.Node.Content, "main.go") {
-			foundEpisode = true
-		}
+	// The session's history is kept outside the graph.
+	var ss []struct {
+		ID            string
+		FirstPrompt   string `json:"first_prompt"`
+		Used, Created []struct{ ID, Title string }
 	}
-	if !foundEpisode {
-		t.Fatalf("episode with edited files not recallable: %+v", r.Hits)
+	c.json(&ss, "sessions")
+	if len(ss) != 1 || len(ss[0].Used) != 1 || ss[0].Used[0].ID != sqlite ||
+		len(ss[0].Created) != 1 || ss[0].Created[0].ID != added.Node.ID || !strings.Contains(ss[0].FirstPrompt, "sqlite") {
+		t.Fatalf("sessions: %+v", ss)
 	}
 	// Bad input never fails the hook (exit 0, message on stderr).
 	cmd := exec.Command(binary, "--db", c.db, "hook", "prompt")
@@ -482,7 +481,7 @@ func TestHookLifecycle(t *testing.T) {
 	}
 	c.json(&u, "eval", "report", "--json")
 	if u.Sessions != 1 || u.Prompts != 2 || u.Recalls != 2 || u.Created != 1 || u.UsedOfInj != 1 ||
-		u.Nudges != 1 || u.NudgeResponse != 1 || u.Episodes != 1 ||
+		u.Nudges != 1 || u.NudgeResponse != 1 || u.Episodes != 0 ||
 		u.BySource["prompt"].Recalls != 1 || u.BySource["claude"].Recalls != 1 {
 		t.Fatalf("usage report: %+v", u)
 	}
