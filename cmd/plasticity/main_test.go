@@ -171,6 +171,28 @@ func TestErrors(t *testing.T) {
 	}
 }
 
+func TestViz(t *testing.T) {
+	c := newCLI(t)
+	c.add("SQLite storage", "single file")
+	file := filepath.Join(t.TempDir(), "g.html")
+	var res struct {
+		File   string `json:"file"`
+		Opened bool   `json:"opened"`
+	}
+	c.json(&res, "viz", "--no-open", "-o", file)
+	b, err := os.ReadFile(file)
+	if err != nil || res.File != file || res.Opened {
+		t.Fatalf("viz: %v %+v", err, res)
+	}
+	if !strings.Contains(string(b), "SQLite storage") || !strings.HasPrefix(string(b), "<!doctype html>") {
+		t.Fatal("viz page does not contain the graph")
+	}
+	out, err := c.run("export", "-f", "html")
+	if err != nil || !strings.Contains(string(out), "SQLite storage") {
+		t.Fatalf("html export: %v", err)
+	}
+}
+
 func TestStdinAndLinks(t *testing.T) {
 	c := newCLI(t)
 	a := c.add("Decision", "use WAL")
