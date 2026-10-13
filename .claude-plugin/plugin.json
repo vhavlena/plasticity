@@ -1,11 +1,11 @@
 {
   "name": "plasticity",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Brain-like long-term memory for Claude Code: a knowledge graph of neurons (decisions, facts, rationales, procedures) with Hebbian learning and interference-based forgetting. Recalls relevant memories on every prompt.",
   "author": {
     "name": "Vojtěch Havlena"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "keywords": [
     "memory",
     "knowledge-graph",

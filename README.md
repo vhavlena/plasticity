@@ -123,3 +123,7 @@ internal/hooks       Claude Code hook handlers
 internal/eval        scenario replay, metrics, usage reports
 internal/viz         self-contained interactive HTML visualization
 ```
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
