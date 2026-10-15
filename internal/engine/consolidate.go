@@ -10,6 +10,7 @@ import (
 	"github.com/vhavlena/plasticity/internal/model"
 	"github.com/vhavlena/plasticity/internal/plasticity"
 	"github.com/vhavlena/plasticity/internal/store"
+	"github.com/vhavlena/plasticity/internal/version"
 	"github.com/vhavlena/plasticity/internal/viz"
 )
 
@@ -185,10 +186,10 @@ func (e *Engine) Export(w io.Writer, format string) error {
 	if format == "json" {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
-		return enc.Encode(map[string]any{"exported_at": now, "nodes": nodes, "edges": edges})
+		return enc.Encode(map[string]any{"version": version.String(), "exported_at": now, "nodes": nodes, "edges": edges})
 	}
 	if format == "html" {
-		return viz.Write(w, map[string]any{"exported_at": now, "nodes": nodes, "edges": edges})
+		return viz.Write(w, map[string]any{"version": version.String(), "exported_at": now, "nodes": nodes, "edges": edges})
 	}
 	return writeDOT(w, nodes, edges)
 }

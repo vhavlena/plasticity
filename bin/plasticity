@@ -41,7 +41,7 @@ build() {
 	if stale; then
 		echo "plasticity: building $bin (first use takes a minute) ..." >&2
 		tmp="$bin.tmp.$$"
-		(cd "$root" && CGO_ENABLED=0 go build -trimpath -o "$tmp" ./cmd/plasticity)
+		(cd "$root" && CGO_ENABLED=0 go build -trimpath -ldflags "-X github.com/vhavlena/plasticity/internal/version.Version=${version:-dev}" -o "$tmp" ./cmd/plasticity)
 		mv -f "$tmp" "$bin"
 	fi
 	rmdir "$lock" 2>/dev/null || true
