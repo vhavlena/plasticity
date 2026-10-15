@@ -162,7 +162,8 @@ Run every plasticity command as %s ... (it selects this session's memory).
   work in an unfamiliar area, when stuck on an error, before re-investigating a problem:
   %s recall "<specific question or error>" --session %s
 - Store durable knowledge (decisions with rationale, root causes, working procedures, preferences):
-  %s add -t decision|fact|procedure|concept|rationale|question --title "..." -c "..." -r "why" --session %s
+  %s add -t decision|fact|procedure|concept|rationale|question --title "..." -c "..." -r "why" --importance 0..1 --session %s
+  (importance: 0.8-1 user preferences/corrections and costly decisions or root causes, 0.4-0.7 useful facts and procedures, 0.1-0.3 minor details)
 - Report memories you actually used (also ones you found via plasticity search/recall):
   %s used --session %s ID [ID...]
 Use the plasticity:memory skill for guidance.`, st.Nodes, cfg.Scope, search, id, cli, cli, id, cli, id, cli, id)
@@ -261,7 +262,7 @@ func FormatMemories(r *engine.RecallResult, session, cli string, budget int) str
 func nudgeReason(session, cli string) string {
 	return fmt.Sprintf(`Before finishing, update long-term memory (plasticity) if this session produced anything worth keeping:
 - durable knowledge (decisions with rationale, root causes, working procedures, user preferences):
-  %s add -t <type> --title "..." -c "..." -r "why" --session %s
+  %s add -t <type> --title "..." -c "..." -r "why" --importance 0..1 --session %s
 - memories that helped: %s used --session %s ID [ID...]
 If nothing is worth keeping, simply finish; you will not be asked again in this session.`, cli, session, cli, session)
 }

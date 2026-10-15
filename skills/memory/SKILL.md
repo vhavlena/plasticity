@@ -34,11 +34,22 @@ Store something when it will matter in a future session:
 plasticity add -t decision --title "Use SQLite WAL for storage" \
   -c "Single file, many readers, one writer" \
   -r "Hooks run as separate processes; Badger allows one process per DB" \
-  --tags storage,db --session <SESSION_ID> [--link <ID>:supports]
+  --importance 0.7 --tags storage,db --session <SESSION_ID> [--link <ID>:supports]
 ```
 
 - **Title**: one specific, self-contained line (it is searched with the highest weight).
 - **Rationale** (`-r`): why — the most valuable part; never omit it for decisions.
+- **Importance** (`--importance`, 0–1, default 0): how much it matters if this is
+  forgotten. It is the only signal for a new neuron (usage is learned later), and
+  it raises the neuron in recall ranking. Always set it:
+
+  | importance | for |
+  |---|---|
+  | 0.8–1.0 | user preferences and corrections; decisions or root causes that were costly to reach or costly to get wrong |
+  | 0.4–0.7 | useful project facts, working procedures, ordinary decisions |
+  | 0.1–0.3 | minor details, open questions, context that is nice to have |
+
+  Adjust it later with `plasticity update ID --importance X` when its weight changes.
 - **One idea per neuron.** Several ideas → several `add` calls; link them with
   `--link ID:kind` (`supports`, `derives_from`, `contradicts`, `part_of`, `explicit`).
 - `--session` links the neuron to what this session already used or created.
