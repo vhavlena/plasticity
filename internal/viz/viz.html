@@ -137,7 +137,7 @@ button:hover { border-color: var(--muted); }
 		<div>
 			<h2>Labels</h2>
 			<div class="filters">
-				<label><input type="radio" name="labels" value="auto" checked> Auto (by zoom)</label>
+				<label><input type="radio" name="labels" value="auto" checked> Auto (no overlaps)</label>
 				<label><input type="radio" name="labels" value="all"> All</label>
 				<label><input type="radio" name="labels" value="none"> Selection only</label>
 			</div>
@@ -189,12 +189,16 @@ for (const e of DATA.edges) {
 }
 for (const n of nodes) n.r = 4 + 7 * n.importance + Math.min(6, 1.5 * Math.log2(1 + n.fires));
 
-// Initial positions on a sunflower spiral (deterministic, evenly spread).
-nodes.forEach((n, i) => {
-	const r = 14 * Math.sqrt(i + 0.5), a = i * 2.399963;
-	n.x = r * Math.cos(a);
-	n.y = r * Math.sin(a);
-});
+// Labels: truncated title and its width at the base font size (= world units
+// at zoom 1). The layout reserves this space so labels need not overlap.
+const FONT = `-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+const LABEL_PX = 12, LABEL_MAX = 38, LABEL_GAP = 5, LABEL_PAD = 4, LABEL_VPAD = 9;
+ctx.font = `${LABEL_PX}px ${FONT}`;
+for (const n of nodes) {
+	n.label = n.title.length > LABEL_MAX ? n.title.slice(0, LABEL_MAX - 1).trimEnd() + "…" : n.title;
+	n.lw = ctx.measureText(n.label).width;
+	n.rank = 3 * n.importance + Math.log2(1 + n.fires) + Math.log2(1 + n.adj.length);
+}
 
 const state = {
 	types: new Set(TYPES), kinds: new Set(KINDS), dormant: true, isolated: true, minW: 0,
@@ -216,13 +220,23 @@ function applyFilters() {
 	if (state.selected && !state.selected.vis) select(null);
 	$("empty").style.display = visNodes.length ? "none" : "flex";
 	$("empty").textContent = nodes.length ? "No neurons match the filters." : "The graph is empty. Neurons appear here once memories are stored.";
-	reheat(0.5);
+	// Of parallel synapses between the same pair, draw only the typed one.
+	const typed = new Set();
+	for (const e of visEdges) if (e.kind !== "associative") typed.add(pairKey(e));
+	for (const e of visEdges) e.drawn = e.kind !== "associative" || !typed.has(pairKey(e));
+	layoutAll();
+	fit();
 }
+const pairKey = (e) => (e.s.i < e.t.i ? e.s.i + ":" + e.t.i : e.t.i + ":" + e.s.i);
 
 // ------------------------------------------------------------------ layout
-// Velocity Verlet-style force simulation: Barnes–Hut repulsion, weighted
-// springs along synapses, and a weak pull to the center.
-let alpha = 1;
+// Each connected component is laid out on its own by a force simulation
+// (Barnes–Hut repulsion, weighted springs along synapses, a weak pull to the
+// component's center), then the components are packed into centered rows.
+// Per component: phase 1 untangles without labels (small components keep the
+// best of several seeded starts by edge crossings), phase 2 adds the label
+// boxes so labels get room without freezing a tangled layout.
+let alpha = 0, comps = [], seed = 1;
 const ALPHA_MIN = 0.002, ALPHA_DECAY = 0.0228, VELOCITY_DECAY = 0.4, THETA2 = 0.81;
 function reheat(a) { alpha = Math.max(alpha, a); kick(); }
 
@@ -238,7 +252,7 @@ function buildTree(ns) {
 	return root;
 }
 function insert(q, n, depth) {
-	const c = 30 + 30 * n.importance;
+	const c = 120 + 80 * n.importance;
 	q.cx = (q.cx * q.m + n.x * c) / (q.m + c);
 	q.cy = (q.cy * q.m + n.y * c) / (q.m + c);
 	q.m += c;
@@ -259,6 +273,7 @@ function place(q, n, depth) {
 	insert(q.kids[k], n, depth + 1);
 }
 function repel(q, n) {
+	if (!q) return;
 	if (q.n === n && !q.kids) return;
 	let dx = q.cx - n.x, dy = q.cy - n.y, d2 = dx * dx + dy * dy;
 	if (q.kids && (q.size * q.size) / (d2 || 1e-9) >= THETA2) {
@@ -281,16 +296,68 @@ function repel(q, n) {
 	n.vy -= dy * f;
 }
 
-function tick() {
-	const ns = visNodes;
-	if (!ns.length) return;
-	const tree = buildTree(ns);
-	for (const n of ns) repel(tree, n);
-	for (const e of visEdges) {
+// Rectangle collision between "node + label to its right" boxes (sweep and
+// prune along x). Overlapping boxes are pushed apart along the axis of least
+// overlap, which for wide labels means stacking them vertically.
+function collideLabels(ns) {
+	if (ns.length > 1500) return;
+	const bs = ns.map((n) => {
+		const x = n.x + n.vx, y = n.y + n.vy, h = Math.max(n.r, LABEL_PX / 2 + 3) + LABEL_VPAD;
+		return { n, l: x - n.r - LABEL_PAD, r: x + n.r + LABEL_GAP + n.lw + LABEL_PAD, t: y - h, b: y + h };
+	});
+	bs.sort((a, b) => a.l - b.l);
+	for (let i = 0; i < bs.length; i++) {
+		const A = bs[i];
+		for (let j = i + 1; j < bs.length && bs[j].l < A.r; j++) {
+			const B = bs[j];
+			const ox = Math.min(A.r, B.r) - Math.max(A.l, B.l), oy = Math.min(A.b, B.b) - Math.max(A.t, B.t);
+			if (ox <= 0 || oy <= 0) continue;
+			const a = A.n, b = B.n;
+			const wa = a.fixed ? 0 : b.fixed ? 1 : 0.5, wb = 1 - wa;
+			if (oy < ox) {
+				const s = (A.t + A.b < B.t + B.b ? -1 : 1) * oy * 0.5;
+				a.vy += s * wa; b.vy -= s * wb;
+			} else {
+				const s = (A.l + A.r < B.l + B.r ? -1 : 1) * ox * 0.5;
+				a.vx += s * wa; b.vx -= s * wb;
+			}
+		}
+	}
+}
+
+function findComponents() {
+	for (const n of nodes) n.comp = null;
+	comps = [];
+	for (const s0 of visNodes) {
+		if (s0.comp) continue;
+		const c = { nodes: [], edges: [], cx: 0, cy: 0, tree: null };
+		s0.comp = c;
+		const stack = [s0];
+		while (stack.length) {
+			const n = stack.pop();
+			c.nodes.push(n);
+			for (const e of n.adj) {
+				if (!e.vis) continue;
+				const o = e.s === n ? e.t : e.s;
+				if (!o.comp) { o.comp = c; stack.push(o); }
+			}
+		}
+		comps.push(c);
+	}
+	for (const e of visEdges) e.s.comp.edges.push(e);
+}
+
+function tickComp(c, labels) {
+	const ns = c.nodes;
+	if (ns.length > 1) {
+		const tree = buildTree(ns);
+		for (const n of ns) repel(tree, n);
+	}
+	for (const e of c.edges) {
 		const s = e.s, t = e.t;
 		let dx = t.x + t.vx - s.x - s.vx, dy = t.y + t.vy - s.y - s.vy;
 		const d = Math.sqrt(dx * dx + dy * dy) || 1;
-		const len = 40 + s.r + t.r + 90 * (1 - e.w);
+		const len = 70 + s.r + t.r + 70 * (1 - e.w);
 		const k = (0.15 + 0.6 * e.w) / Math.min(s.deg, t.deg);
 		const f = ((d - len) / d) * alpha * k;
 		dx *= f; dy *= f;
@@ -298,17 +365,146 @@ function tick() {
 		t.vx -= dx * bs; t.vy -= dy * bs;
 		s.vx += dx * (1 - bs); s.vy += dy * (1 - bs);
 	}
+	if (labels) collideLabels(ns);
 	for (const n of ns) {
-		const g = n.deg ? 0.02 : 0.06; // unconnected neurons gather closer in
-		n.vx -= n.x * g * alpha;
-		n.vy -= n.y * g * alpha;
+		n.vx -= (n.x - c.cx) * 0.03 * alpha;
+		n.vy -= (n.y - c.cy) * 0.03 * alpha;
 		if (n.fixed) { n.vx = n.vy = 0; continue; }
 		n.vx *= 1 - VELOCITY_DECAY;
 		n.vy *= 1 - VELOCITY_DECAY;
 		n.x += n.vx;
 		n.y += n.vy;
 	}
+}
+
+// Animation step (after a drag or a reheat): components keep their places.
+function tick() {
+	const labels = state.labels !== "none";
+	for (const c of comps) if (c.nodes.length > 1) tickComp(c, labels);
 	alpha += (0 - alpha) * ALPHA_DECAY;
+}
+
+// Runs a component's simulation synchronously from alpha a0 down to ~0.005.
+function settle(c, ticks, labels, a0) {
+	const decay = 1 - Math.pow(0.005 / a0, 1 / ticks);
+	alpha = a0;
+	for (let i = 0; i < ticks; i++) {
+		tickComp(c, labels);
+		alpha -= alpha * decay;
+	}
+	alpha = 0;
+}
+
+// Layout quality: edge crossings, plus edges running through other neurons.
+function badness(c) {
+	const es = c.edges.filter((e) => e.drawn);
+	let bad = 0;
+	const cross = (a, b, p, q) => {
+		const o = (u, v, w) => (v.x - u.x) * (w.y - u.y) - (v.y - u.y) * (w.x - u.x);
+		return o(a, b, p) * o(a, b, q) < 0 && o(p, q, a) * o(p, q, b) < 0;
+	};
+	for (let i = 0; i < es.length; i++)
+		for (let j = i + 1; j < es.length; j++) {
+			const a = es[i], b = es[j];
+			if (a.s === b.s || a.s === b.t || a.t === b.s || a.t === b.t) continue;
+			if (cross(a.s, a.t, b.s, b.t)) bad++;
+		}
+	for (const e of es) {
+		const dx = e.t.x - e.s.x, dy = e.t.y - e.s.y, l2 = dx * dx + dy * dy || 1;
+		for (const n of c.nodes) {
+			if (n === e.s || n === e.t) continue;
+			const u = Math.max(0, Math.min(1, ((n.x - e.s.x) * dx + (n.y - e.s.y) * dy) / l2));
+			if (Math.hypot(e.s.x + u * dx - n.x, e.s.y + u * dy - n.y) < n.r + 6) bad += 2;
+		}
+	}
+	return bad;
+}
+
+function mulberry32(a) {
+	return () => {
+		a = (a + 0x6d2b79f5) | 0;
+		let t = Math.imul(a ^ (a >>> 15), 1 | a);
+		t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+	};
+}
+
+function layoutAll() {
+	const rnd = mulberry32(seed);
+	findComponents();
+	const labels = state.labels !== "none";
+	for (const c of comps) {
+		const ns = c.nodes;
+		c.cx = c.cy = 0;
+		for (const n of ns) n.vx = n.vy = 0;
+		if (ns.length === 1) { ns[0].x = ns[0].y = 0; continue; }
+		const big = ns.length > 300;
+		const trials = ns.length <= 60 && c.edges.length <= 200 ? 10 : 1;
+		const spread = 30 * Math.sqrt(ns.length);
+		let best = null, bestBad = Infinity;
+		for (let t = 0; t < trials && bestBad > 0; t++) {
+			for (const n of ns) { n.x = (rnd() - 0.5) * spread; n.y = (rnd() - 0.5) * spread; n.vx = n.vy = 0; }
+			settle(c, big ? 120 : 250, false, 1);
+			const bad = trials > 1 ? badness(c) : 0;
+			if (bad < bestBad) { bestBad = bad; best = ns.map((n) => [n.x, n.y]); }
+		}
+		ns.forEach((n, i) => { n.x = best[i][0]; n.y = best[i][1]; n.vx = n.vy = 0; });
+		if (labels) settle(c, big ? 60 : 120, true, 0.25);
+	}
+	// Labels keep their screen size, so when the view has to zoom out to k < 1
+	// they take 1/k times more world space: repack for the zoom it will get.
+	let ls = 1;
+	for (let i = 0; i < 5; i++) {
+		pack(ls);
+		const next = 1 / fitZoom(visNodes, 1).k;
+		if (Math.abs(next - ls) < 0.02 * ls) break;
+		ls = next;
+	}
+}
+
+// Shelf packing: components sorted by size fill rows about as wide as the
+// viewport's aspect suggests; each row is centered.
+function pack(ls) {
+	const GAP = 28 * ls;
+	for (const c of comps) {
+		const { l, t, r, b } = bounds(c.nodes, ls);
+		Object.assign(c, { l, t, w: r - l + GAP, h: b - t + GAP });
+	}
+	const order = [...comps].sort((a, b) => b.nodes.length - a.nodes.length || b.h - a.h);
+	const shelve = (rowW) => {
+		const rows = [];
+		let row = null;
+		for (const c of order) {
+			if (!row || row.w + c.w > rowW) rows.push(row = { cs: [], w: 0, h: 0 });
+			row.cs.push(c);
+			row.w += c.w;
+			row.h = Math.max(row.h, c.h);
+		}
+		return rows;
+	};
+	// Try row widths and keep the packing that fits the viewport at the
+	// largest zoom.
+	const vw = Math.max(1, (W || 1200) - 2 * FIT_PAD), vh = Math.max(1, (H || 800) - 2 * FIT_PAD), widest = Math.max(...order.map((c) => c.w));
+	const total = order.reduce((s, c) => s + c.w, 0);
+	let rows = null, bestK = -1;
+	for (let i = 0; i <= 24; i++) {
+		const rw = widest + ((total - widest) * i) / 24;
+		const rs = shelve(rw);
+		const k = Math.min(vw / Math.max(...rs.map((r) => r.w)), vh / rs.reduce((s, r) => s + r.h, 0));
+		if (k > bestK + 1e-9) { bestK = k; rows = rs; }
+	}
+	const totalH = rows.reduce((s, r) => s + r.h, 0);
+	let y = -totalH / 2;
+	for (const r of rows) {
+		let x = -r.w / 2;
+		for (const c of r.cs) {
+			const dx = x - c.l + GAP / 2, dy = y + (r.h - c.h) / 2 - c.t + GAP / 2;
+			for (const n of c.nodes) { n.x += dx; n.y += dy; }
+			c.cx += dx; c.cy += dy;
+			x += c.w;
+		}
+		y += r.h;
+	}
 }
 
 // ------------------------------------------------------------------ drawing
@@ -350,6 +546,7 @@ function draw() {
 
 	// Edges
 	for (const e of visEdges) {
+		if (!e.drawn) continue;
 		const on = focus ? focus.has(e.s) && focus.has(e.t) && (e.s === (state.selected || state.hover) || e.t === (state.selected || state.hover)) : !searching;
 		ctx.globalAlpha = on ? 1 : 0.15;
 		ctx.strokeStyle = e.kind === "associative" ? colors.edge : colors["k-" + e.kind];
@@ -386,28 +583,81 @@ function draw() {
 		}
 	}
 
-	// Labels (constant screen size)
-	const fs = 12 / k;
-	ctx.font = `${fs}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-	ctx.textBaseline = "middle";
-	ctx.lineJoin = "round";
-	for (const n of visNodes) {
-		let show;
-		if (focus) show = focus.has(n);
-		else if (searching) show = state.matches.has(n);
-		else if (state.labels === "all") show = true;
-		else if (state.labels === "auto") show = n.r * k >= 9 || k >= 1.6;
-		else show = false;
-		if (!show) continue;
-		const text = n.title.length > 48 ? n.title.slice(0, 46) + "…" : n.title;
-		ctx.globalAlpha = lit(n) ? 1 : 0.3;
-		ctx.lineWidth = 3 / k;
-		ctx.strokeStyle = colors.halo;
-		ctx.strokeText(text, n.x + n.r + 4 / k, n.y);
-		ctx.fillStyle = colors.label;
-		ctx.fillText(text, n.x + n.r + 4 / k, n.y);
-	}
+	drawLabels(focus, searching, lit);
 	ctx.globalAlpha = 1;
+}
+
+// Labels are drawn in screen space at a constant size. They are placed
+// greedily by priority (selection and hover first, then importance); each
+// tries right, left, below and above its neuron and is skipped when every
+// spot would cover another label or neuron. Forced labels (selection, its
+// neighbors, search hits, "All" mode) always show, in the least crowded spot.
+function drawLabels(focus, searching, lit) {
+	const { x: vx, y: vy, k } = state.view;
+	const ox = W / 2 + vx, oy = H / 2 + vy;
+	const grid = new Map(), CELL = 64;
+	const cells = (b, f) => {
+		for (let gx = Math.floor(b.l / CELL); gx <= Math.floor(b.r / CELL); gx++)
+			for (let gy = Math.floor(b.t / CELL); gy <= Math.floor(b.b / CELL); gy++) f(gx + "," + gy);
+	};
+	const put = (b) => cells(b, (key) => { const c = grid.get(key); c ? c.push(b) : grid.set(key, [b]); });
+	const hits = (b) => {
+		let h = 0;
+		const seen = new Set();
+		cells(b, (key) => {
+			for (const o of grid.get(key) || []) {
+				if (seen.has(o) || o.n === b.n) continue;
+				seen.add(o);
+				if (o.l < b.r && b.l < o.r && o.t < b.b && b.t < o.b) h++;
+			}
+		});
+		return h;
+	};
+
+	const cand = [];
+	for (const n of visNodes) {
+		const sx = ox + n.x * k, sy = oy + n.y * k, rs = n.r * k;
+		if (sx + rs < -300 || sx - rs > W + 20 || sy + rs < -20 || sy - rs > H + 20) continue;
+		put({ n, l: sx - rs - 1, r: sx + rs + 1, t: sy - rs - 1, b: sy + rs + 1 });
+		let forced = false, show;
+		if (focus) show = forced = focus.has(n);
+		else if (searching) show = forced = state.matches.has(n);
+		else if (state.labels === "none") show = false;
+		else { show = true; forced = state.labels === "all"; }
+		if (n === state.selected || n === state.hover) { show = true; forced = true; }
+		if (show) cand.push({ n, sx, sy, rs, forced, p: (n === state.selected ? 3e9 : n === state.hover ? 2e9 : forced ? 1e9 : 0) + n.rank });
+	}
+	cand.sort((a, b) => b.p - a.p);
+
+	ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+	ctx.font = `${LABEL_PX}px ${FONT}`;
+	ctx.textBaseline = "middle";
+	const h = LABEL_PX + 6, px = 4;
+	for (const c of cand) {
+		const { n, sx, sy, rs } = c, w = n.lw + 2 * px, g = LABEL_GAP;
+		const spots = [
+			{ l: sx + rs + g, t: sy - h / 2 },
+			{ l: sx - rs - g - w, t: sy - h / 2 },
+			{ l: sx - w / 2, t: sy + rs + 2 },
+			{ l: sx - w / 2, t: sy - rs - 2 - h },
+		];
+		let best = null, bh = Infinity;
+		for (const s of spots) {
+			const b = { n, l: s.l, r: s.l + w, t: s.t, b: s.t + h };
+			const hh = hits(b) + (b.l < 0 || b.r > W || b.t < 0 || b.b > H ? 1 : 0);
+			if (hh < bh) { best = b; bh = hh; }
+			if (!hh) break;
+		}
+		if (bh && !c.forced) continue;
+		put(best);
+		ctx.globalAlpha = lit(n) ? 1 : 0.3;
+		ctx.fillStyle = colors.halo;
+		ctx.beginPath();
+		if (ctx.roundRect) ctx.roundRect(best.l, best.t, w, h, 4); else ctx.rect(best.l, best.t, w, h);
+		ctx.fill();
+		ctx.fillStyle = colors.label;
+		ctx.fillText(n.label, best.l + px, best.t + h / 2 + 0.5);
+	}
 }
 
 function arrow(e, k) {
@@ -459,17 +709,37 @@ function zoomAt(sx, sy, factor) {
 	v.y = sy - H / 2 - p.y * k;
 	kick();
 }
-function fit(ns = visNodes, maxK = 2) {
+// The default cap of 1 keeps world units equal to screen pixels when the graph
+// fits, so the room the layout reserved for (screen-sized) labels is exact.
+function fit(ns = visNodes, maxK = 1) {
 	if (!ns.length) return;
-	let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-	for (const n of ns) {
-		x0 = Math.min(x0, n.x - n.r); x1 = Math.max(x1, n.x + n.r);
-		y0 = Math.min(y0, n.y - n.r); y1 = Math.max(y1, n.y + n.r);
-	}
-	const pad = 60;
-	const k = Math.min(maxK, (W - pad * 2) / Math.max(1, x1 - x0), (H - pad * 2) / Math.max(1, y1 - y0));
-	state.view = { k, x: -((x0 + x1) / 2) * k, y: -((y0 + y1) / 2) * k };
+	const { k, b } = fitZoom(ns, maxK);
+	state.view = { k, x: -((b.l + b.r) / 2) * k, y: -((b.t + b.b) / 2) * k };
 	kick();
+}
+// World bounding box of neurons with their labels, labels scaled by ls
+// (world units per screen pixel).
+function bounds(ns, ls) {
+	const lab = state.labels !== "none";
+	let l = Infinity, t = Infinity, r = -Infinity, b = -Infinity;
+	for (const n of ns) {
+		const hh = Math.max(n.r, lab ? (LABEL_PX / 2 + 3) * ls : 0);
+		l = Math.min(l, n.x - n.r); r = Math.max(r, n.x + n.r + (lab ? (LABEL_GAP + n.lw) * ls : 0));
+		t = Math.min(t, n.y - hh); b = Math.max(b, n.y + hh);
+	}
+	return { l, t, r, b };
+}
+// Zoom that fits ns (labels at screen size) into the viewport, capped at maxK.
+const FIT_PAD = 40;
+function fitZoom(ns, maxK) {
+	let k = maxK, b = null;
+	for (let i = 0; i < 6; i++) {
+		b = bounds(ns, 1 / k);
+		const nk = Math.min(maxK, (W - 2 * FIT_PAD) / Math.max(1, b.r - b.l), (H - 2 * FIT_PAD) / Math.max(1, b.b - b.t));
+		if (Math.abs(nk - k) < 0.01 * k) { k = nk; break; }
+		k = nk;
+	}
+	return { k: Math.max(0.05, k), b };
 }
 
 const pointers = new Map();
@@ -633,6 +903,7 @@ function buildControls() {
 	let s = `${nodes.length} neurons · ${edges.length} synapses`;
 	if (dormant) s += ` · ${dormant} dormant`;
 	if (DATA.exported_at) s += `\nexported ${fmtDate(DATA.exported_at)}`;
+	if (DATA.version) s += `\nplasticity ${DATA.version}`;
 	$("summary").textContent = s;
 	$("summary").style.whiteSpace = "pre-line";
 }
@@ -644,13 +915,12 @@ $("minw").oninput = (e) => {
 	$("minwv").textContent = state.minW.toFixed(2);
 	applyFilters();
 };
-for (const r of document.querySelectorAll('input[name="labels"]')) r.onchange = (e) => { state.labels = e.target.value; kick(); };
+for (const r of document.querySelectorAll('input[name="labels"]')) r.onchange = (e) => { state.labels = e.target.value; layoutAll(); fit(); };
 $("fit").onclick = () => fit();
 $("relayout").onclick = () => {
-	for (const n of nodes) { n.x += (Math.random() - 0.5) * 50; n.y += (Math.random() - 0.5) * 50; }
-	alpha = 1;
-	kick();
-	setTimeout(() => fit(), 1200);
+	seed++;
+	layoutAll();
+	fit();
 };
 $("toggle").onclick = () => $("side").classList.toggle("open");
 
@@ -688,9 +958,6 @@ window.addEventListener("resize", resize);
 buildControls();
 resize();
 applyFilters();
-// Settle the layout before the first paint so the view opens on a stable graph.
-for (let i = 0; i < 300 && alpha > 0.02; i++) tick();
-fit();
 </script>
 </body>
 </html>

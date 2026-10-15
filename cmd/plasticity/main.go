@@ -24,6 +24,7 @@ import (
 	"github.com/vhavlena/plasticity/internal/model"
 	"github.com/vhavlena/plasticity/internal/paths"
 	"github.com/vhavlena/plasticity/internal/store"
+	"github.com/vhavlena/plasticity/internal/version"
 )
 
 type app struct {
@@ -94,6 +95,7 @@ func newRoot(out io.Writer, in io.Reader) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "plasticity",
 		Short:         "Neural knowledge graph with Hebbian plasticity",
+		Version:       version.String(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
