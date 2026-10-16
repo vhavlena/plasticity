@@ -616,6 +616,12 @@ func (t *Tx) LoadParams() (model.Params, error) {
 	if err := rows.Err(); err != nil {
 		return model.Params{}, err
 	}
+	known := model.DefaultParams().ToMap()
+	for k := range m {
+		if _, ok := known[k]; !ok {
+			delete(m, k) // override of a retired parameter
+		}
+	}
 	return model.DefaultParams().With(m)
 }
 

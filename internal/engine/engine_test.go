@@ -190,7 +190,7 @@ func TestStrongerLinksReachDeeper(t *testing.T) {
 	}
 }
 
-func TestSpacedReinforcementSurvivesMassedIsForgotten(t *testing.T) {
+func TestSpacedReinforcementSurvivesMassedFadesToFloor(t *testing.T) {
 	f := newFixture(t)
 	spaced := []string{f.ids["sqlite"], f.ids["hooks"]}
 	massed := []string{f.ids["spread"], f.ids["hebb"]}
@@ -204,18 +204,21 @@ func TestSpacedReinforcementSurvivesMassedIsForgotten(t *testing.T) {
 		f.fire(15, "sqlite") // used elsewhere between reinforcements
 	}
 	f.fire(60, "sqlite", "hooks", "spread", "hebb")
-	rep, err := f.e.Consolidate(false)
+	rep, err := f.e.Consolidate()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.Pruned != 1 || rep.EdgesScanned != 2 {
+	if rep.EdgesScanned != 2 {
 		t.Fatalf("consolidate: %+v", rep)
 	}
-	if f.edge("spread", "hebb") != nil {
-		t.Fatal("unreinforced edge should be pruned")
+	if f.edge("spread", "hebb") == nil || f.edge("sqlite", "hooks") == nil {
+		t.Fatal("weakening must never remove an edge")
 	}
-	if f.edge("sqlite", "hooks") == nil {
-		t.Fatal("spaced-reinforced edge should survive")
+	if w := f.weight("spread", "hebb"); w > f.e.P.AssocWeightFloor+0.01 {
+		t.Fatalf("massed edge should fade to the floor, w=%g", w)
+	}
+	if w := f.weight("sqlite", "hooks"); w < 0.2 {
+		t.Fatalf("spaced-reinforced edge should stay strong, w=%g", w)
 	}
 }
 
@@ -277,11 +280,11 @@ func TestHomeostasisBoundsHub(t *testing.T) {
 
 func TestDormancyAndReactivation(t *testing.T) {
 	f := newFixture(t)
-	if rep, _ := f.e.Consolidate(false); rep.Dormant != 0 {
+	if rep, _ := f.e.Consolidate(); rep.Dormant != 0 {
 		t.Fatalf("fresh nodes must not be dormant: %+v", rep)
 	}
 	f.ticks(4000) // ≈ e^8 recalls elsewhere: B = −4
-	rep, err := f.e.Consolidate(false)
+	rep, err := f.e.Consolidate()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,12 +320,15 @@ func TestTypedLinksAndNodeView(t *testing.T) {
 		v.Edges[0].OtherTitle != "Badger holds an exclusive directory lock" {
 		t.Fatalf("node view: %+v", v.Edges)
 	}
-	// typed edges decay to the floor and are not pruned
+	// typed edges decay to the floor and are not removed
 	f.fire(5000, "sqlite")
-	if rep, _ := f.e.Consolidate(false); rep.Pruned != 0 {
-		t.Fatalf("typed edge pruned: %+v", rep)
+	if _, err := f.e.Consolidate(); err != nil {
+		t.Fatal(err)
 	}
 	v, _ = f.e.GetNode(f.ids["sqlite"])
+	if len(v.Edges) != 1 {
+		t.Fatalf("typed edge removed: %+v", v.Edges)
+	}
 	if w := v.Edges[0].Weight; w < f.e.P.TypedWeightFloor-1e-9 {
 		t.Fatalf("typed weight %g below floor", w)
 	}
@@ -489,8 +495,8 @@ func TestNoRecallsNoForgetting(t *testing.T) {
 	f.e.Reinforce([]string{f.ids["sqlite"], f.ids["badger"]})
 	w := f.weight("sqlite", "badger")
 	for i := 0; i < 3; i++ {
-		if rep, _ := f.e.Consolidate(false); rep.Pruned != 0 || f.weight("sqlite", "badger") != w {
-			t.Fatalf("memory changed without recalls: %+v w=%g", rep, f.weight("sqlite", "badger"))
+		if _, err := f.e.Consolidate(); err != nil || f.weight("sqlite", "badger") != w {
+			t.Fatalf("memory changed without recalls: %v w=%g", err, f.weight("sqlite", "badger"))
 		}
 	}
 }
@@ -513,7 +519,7 @@ func TestTraceRetention(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		f.recall("pasta", "")
 	}
-	rep, err := f.e.Consolidate(false)
+	rep, err := f.e.Consolidate()
 	if err != nil || rep.TracesPurged != 1 {
 		t.Fatalf("stale trace not purged: %v %+v", err, rep)
 	}

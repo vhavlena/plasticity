@@ -106,7 +106,6 @@ type Usage struct {
 	LinksCreated int `json:"links_created"`
 	Potentiated  int `json:"links_potentiated"`
 	Depressed    int `json:"links_depressed"`
-	Pruned       int `json:"links_pruned"`
 	Consolidated int `json:"consolidations"`
 
 	// BySource splits recall and use by recall source: "prompt" (automatic,
@@ -170,7 +169,6 @@ type UsageDay struct {
 	Used         int    `json:"used"` // neurons reported used
 	Created      int    `json:"created"`
 	LinksCreated int    `json:"links_created"`
-	Pruned       int    `json:"pruned"`
 }
 
 // ConfidenceBuckets are the histogram bins of Usage.Confidence.
@@ -323,11 +321,7 @@ func AnalyzeUsage(events []store.Event) *Usage {
 				u.Episodes++ // refreshes of resumed sessions' episodes are not new episodes
 			}
 		case engine.EventConsolidate:
-			if p, ok := decode[engine.ConsolidateReport](ev); ok {
-				u.Consolidated++
-				u.Pruned += p.Pruned
-				d.Pruned += p.Pruned
-			}
+			u.Consolidated++
 		case engine.EventNote:
 			if n, ok := decode[UsageNote](ev); ok {
 				n.At, n.Session = ev.At, ev.Session
@@ -464,8 +458,8 @@ func (u *Usage) WriteText(w io.Writer) error {
 	row("reused later", "%d recalled, %d used in a later session (of %d created)", u.CreatedRecalled, u.CreatedUsed, u.Created)
 	row("nudges", "%d, %s answered with add/used", u.Nudges, pct(u.NudgeResponse))
 	fmt.Fprintln(tw, "learning")
-	row("links", "%d created, %d potentiated, %d depressed, %d pruned (%d consolidations)",
-		u.LinksCreated, u.Potentiated, u.Depressed, u.Pruned, u.Consolidated)
+	row("links", "%d created, %d potentiated, %d depressed (%d consolidations)",
+		u.LinksCreated, u.Potentiated, u.Depressed, u.Consolidated)
 	if len(u.NoteLog) > 0 {
 		fmt.Fprintln(tw, "your notes")
 		var kinds []string
@@ -495,9 +489,9 @@ func (u *Usage) WriteText(w io.Writer) error {
 
 	fmt.Fprintln(w, "\nper day")
 	tw = tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(tw, "day\tsessions\trecalls\tempty\tused\tcreated\tlinks+\tpruned\t")
+	fmt.Fprintln(tw, "day\tsessions\trecalls\tempty\tused\tcreated\tlinks+\t")
 	for _, d := range u.Days {
-		fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t\n", d.Day, d.Sessions, d.Recalls, d.Empty, d.Used, d.Created, d.LinksCreated, d.Pruned)
+		fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%d\t%d\t\n", d.Day, d.Sessions, d.Recalls, d.Empty, d.Used, d.Created, d.LinksCreated)
 	}
 	return tw.Flush()
 }

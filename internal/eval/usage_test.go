@@ -67,7 +67,7 @@ func twoSessions() *eventLog {
 	l.add("S2", engine.EventNudge, map[string]int{"tool_calls": 7})
 	l.used("S2", 1, "N", "C")
 	l.add("S2", engine.EventAdd, map[string]any{"title": "new", "duplicate_of": "N"})
-	l.add("S2", engine.EventConsolidate, engine.ConsolidateReport{Pruned: 3})
+	l.add("S2", engine.EventConsolidate, engine.ConsolidateReport{})
 	l.add("", engine.EventAdd, map[string]any{"id": "M"})
 	l.add("", engine.EventError, map[string]string{"op": "setup"})
 	return l
@@ -115,12 +115,12 @@ func TestAnalyzeUsage(t *testing.T) {
 	check("created used later", float64(u.CreatedUsed), 1)
 	check("nudge response", u.NudgeResponse, 1)
 	check("links created", float64(u.LinksCreated), 1)
-	check("pruned", float64(u.Pruned), 3)
+	check("consolidations", float64(u.Consolidated), 1)
 	check("episodes", float64(u.Episodes), 1)
 	if u.Errors["setup"] != 1 {
 		t.Errorf("errors: %v", u.Errors)
 	}
-	if len(u.Days) != 2 || u.Days[0].Recalls != 2 || u.Days[1].Created != 0 || u.Days[1].Pruned != 3 {
+	if len(u.Days) != 2 || u.Days[0].Recalls != 2 || u.Days[1].Created != 0 {
 		t.Errorf("days: %+v", u.Days)
 	}
 	var b strings.Builder

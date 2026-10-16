@@ -135,21 +135,16 @@ func TestLearnRecallForget(t *testing.T) {
 		t.Fatalf("associative recall failed: %+v", r)
 	}
 
-	// Without interfering recalls, consolidation forgets nothing.
-	var cons struct{ Pruned int }
-	c.json(&cons, "consolidate")
-	if cons.Pruned != 0 {
-		t.Fatalf("consolidate pruned an unaged synapse: %+v", cons)
-	}
-
 	// Recalling sqlite alone (θ high enough to keep badger out) is
-	// interference: the sqlite–badger synapse fades and is pruned.
+	// interference: the sqlite–badger synapse fades to the floor weight but
+	// is never removed.
 	for i := 0; i < 15; i++ {
 		c.json(nil, "recall", "sqlite", "--threshold", "0.9")
 	}
-	c.json(&cons, "consolidate")
-	if cons.Pruned != 1 || len(c.edges(a)) != 0 {
-		t.Fatalf("interfered association not forgotten: %+v %v", cons, c.edges(a))
+	c.json(nil, "consolidate")
+	e, ok := c.edges(a)[b+"/associative"]
+	if !ok || e.Weight < 0.05-1e-9 || e.Weight > 0.1 {
+		t.Fatalf("interfered association should fade to the floor: %v", c.edges(a))
 	}
 }
 

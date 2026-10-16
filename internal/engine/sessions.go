@@ -555,7 +555,7 @@ func (e *Engine) EndSession(session string, files []string, episode bool) (*Epis
 		e.Log(session, EventEpisode, map[string]any{"id": rep.Episode.ID, "links": rep.Links, "updated": rep.Updated})
 	}
 	if ended%e.P.ConsolidateEverySessions == 0 {
-		c, err := e.Consolidate(false)
+		c, err := e.Consolidate()
 		if err != nil {
 			return rep, err
 		}

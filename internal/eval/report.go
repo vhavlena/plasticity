@@ -41,11 +41,11 @@ func (r *Report) WriteText(w io.Writer) error {
 
 	fmt.Fprintln(w, "\ngraph after run")
 	tw = tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(tw, "config\tlearned\tspurious\tmean-w\tmax-deg\ttyped\tpreloaded\tpruned\tdormant\tpending\t")
+	fmt.Fprintln(tw, "config\tlearned\tspurious\tmean-w\tmax-deg\ttyped\tpreloaded\tdormant\tpending\t")
 	for _, res := range r.Results {
 		g := res.Graph
-		fmt.Fprintf(tw, "%s\t%d\t%d (%s)\t%.3f\t%d\t%d\t%d\t%d\t%d\t%d\t\n", res.Config, g.Learned, g.Spurious,
-			pct(g.SpuriousRate), g.MeanWeight, g.MaxDegree, g.Typed, g.Preloaded, res.Perf.ConsolidatePr, g.Dormant, g.PendingTraces)
+		fmt.Fprintf(tw, "%s\t%d\t%d (%s)\t%.3f\t%d\t%d\t%d\t%d\t%d\t\n", res.Config, g.Learned, g.Spurious,
+			pct(g.SpuriousRate), g.MeanWeight, g.MaxDegree, g.Typed, g.Preloaded, g.Dormant, g.PendingTraces)
 	}
 	if err := tw.Flush(); err != nil {
 		return err

@@ -233,7 +233,7 @@ func (a *app) evalReportCmd() *cobra.Command {
               and per recall source
   creation    neurons created per session, near-duplicates caught, created
               neurons recalled or used again in later sessions, nudge response
-  learning    links created/potentiated/depressed by 'used', pruned by consolidation
+  learning    links created/potentiated/depressed by 'used'
   notes       your observations ('plasticity note'), and parameter/embedder changes
 
 --by-change splits the period at every parameter or embedder change and
