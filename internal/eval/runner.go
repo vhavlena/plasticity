@@ -77,13 +77,12 @@ type GraphHealth struct {
 
 // Perf collects timings and sizes.
 type Perf struct {
-	LoadMS        float64 `json:"load_ms"`
-	Recall        Latency `json:"recall"`
-	Learn         Latency `json:"learn"`
-	Consolidate   Latency `json:"consolidate"`
-	HeapInUseMB   float64 `json:"heap_in_use_mb"`
-	DBSizeMB      float64 `json:"db_size_mb"`
-	ConsolidatePr int     `json:"pruned_total"`
+	LoadMS      float64 `json:"load_ms"`
+	Recall      Latency `json:"recall"`
+	Learn       Latency `json:"learn"`
+	Consolidate Latency `json:"consolidate"`
+	HeapInUseMB float64 `json:"heap_in_use_mb"`
+	DBSizeMB    float64 `json:"db_size_mb"`
 }
 
 // Result is the outcome of one configuration.
@@ -154,11 +153,8 @@ func Run(s *Scenario, cfg Config, dir string) (*Result, error) {
 	sessionsRun := 0
 	consolidate := func() error {
 		t := time.Now()
-		rep, err := e.Consolidate(false)
+		_, err := e.Consolidate()
 		consT = append(consT, time.Since(t))
-		if err == nil {
-			res.Perf.ConsolidatePr += rep.Pruned
-		}
 		return err
 	}
 	for pass := 1; pass <= cfg.Passes; pass++ {

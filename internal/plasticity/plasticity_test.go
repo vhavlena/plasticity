@@ -39,7 +39,8 @@ func TestDecayIsExponentialInInterference(t *testing.T) {
 		t.Fatalf("w(0) = %g", got)
 	}
 	fire(e, 10)
-	if got, want := EffectiveWeight(e, p), 0.8*math.Exp(-1); !approx(got, want) {
+	floor := p.AssocWeightFloor
+	if got, want := EffectiveWeight(e, p), floor+(0.8-floor)*math.Exp(-1); !approx(got, want) {
 		t.Fatalf("w(S) = %g, want %g", got, want)
 	}
 	prev := 1.0
@@ -69,9 +70,6 @@ func TestTypedEdgesDecayToFloor(t *testing.T) {
 	fire(e, 100000)
 	if w := EffectiveWeight(e, p); !approx(w, p.TypedWeightFloor) {
 		t.Fatalf("typed edge decayed to %g, want floor %g", w, p.TypedWeightFloor)
-	}
-	if ShouldPrune(e, p, false) {
-		t.Fatal("typed edge must not be pruned by default")
 	}
 	low := &model.Edge{Kind: model.KindSupports, Weight: 0.1, Stability: 5}
 	fire(low, 1000)
@@ -170,17 +168,31 @@ func TestDepress(t *testing.T) {
 	}
 }
 
-func TestPruneAfterInterference(t *testing.T) {
+// Weakening never removes a learned link: decay, depression and scaling all
+// stop at the floor, and even a faint co-activation creates a floor-weight link.
+func TestAssociativeWeakeningStopsAtFloor(t *testing.T) {
 	p := model.DefaultParams()
 	e := NewAssociative("a", "b", 0, 0, t0, p)
-	Potentiate(e, 1, 1, t0, p)
-	fire(e, 5)
-	if ShouldPrune(e, p, false) {
-		t.Fatal("lightly interfered edge pruned")
+	Potentiate(e, 0.1, 0.1, t0, p)
+	if !approx(e.Weight, p.AssocWeightFloor) {
+		t.Fatalf("faint co-activation gave w=%g, want floor %g", e.Weight, p.AssocWeightFloor)
 	}
-	fire(e, 50)
-	if !ShouldPrune(e, p, false) {
-		t.Fatalf("edge survived 55 solo firings: w=%g", EffectiveWeight(e, p))
+	Potentiate(e, 1, 1, t0, p)
+	fire(e, 100000)
+	if w := EffectiveWeight(e, p); !approx(w, p.AssocWeightFloor) {
+		t.Fatalf("decayed to %g, want floor %g", w, p.AssocWeightFloor)
+	}
+	strong := assoc(0.5, 7)
+	for i := 0; i < 1000; i++ {
+		Depress(strong, 1, 1, t0, p)
+	}
+	if !approx(strong.Weight, p.AssocWeightFloor) {
+		t.Fatalf("depressed to %g, want floor %g", strong.Weight, p.AssocWeightFloor)
+	}
+	scaled := assoc(0.5, 7)
+	Scale(scaled, 0, p)
+	if !approx(scaled.Weight, p.AssocWeightFloor) {
+		t.Fatalf("scaled to %g, want floor %g", scaled.Weight, p.AssocWeightFloor)
 	}
 }
 
@@ -208,8 +220,48 @@ func TestBaseLevel(t *testing.T) {
 	}
 }
 
-// Property: random sequences of LTP/LTD/interference keep weights in [0,1]
-// and stability in (0, max].
+// Floor-weight links are outside the homeostatic budget: a hub with many
+// faded links is not scaled, and one with strong links too is brought to the
+// budget in one pass without its faded links absorbing the cut.
+func TestScalingIgnoresFloorWeight(t *testing.T) {
+	p := model.DefaultParams()
+	var edges []*model.Edge
+	for i := 0; i < 200; i++ {
+		edges = append(edges, assoc(p.AssocWeightFloor, 7))
+	}
+	excess := func() float64 {
+		sum := 0.0
+		for _, e := range edges {
+			sum += Excess(e, p)
+		}
+		return sum
+	}
+	if f := ScaleFactor(excess(), p.MaxOutWeight); f != 1 {
+		t.Fatalf("faded links alone trigger scaling: f=%g", f)
+	}
+	for i := 0; i < 10; i++ {
+		edges = append(edges, assoc(0.9, 7))
+	}
+	f := ScaleFactor(excess(), p.MaxOutWeight)
+	for _, e := range edges {
+		Scale(e, f, p)
+	}
+	if got := excess(); !approx(got, p.MaxOutWeight) {
+		t.Fatalf("excess after one pass %g, want %g", got, p.MaxOutWeight)
+	}
+	if f := ScaleFactor(excess(), p.MaxOutWeight); f != 1 {
+		t.Fatalf("second pass rescales: f=%g", f)
+	}
+	if want := p.AssocWeightFloor + p.MaxOutWeight/10; !approx(edges[len(edges)-1].Weight, want) {
+		t.Fatalf("strong link scaled to %g, want %g", edges[len(edges)-1].Weight, want)
+	}
+	if !approx(edges[0].Weight, p.AssocWeightFloor) {
+		t.Fatalf("faded link changed to %g", edges[0].Weight)
+	}
+}
+
+// Property: random sequences of LTP/LTD/interference keep weights in
+// [floor,1] and stability in (0, max].
 func TestRandomDynamicsStayBounded(t *testing.T) {
 	p := model.DefaultParams()
 	rng := rand.New(rand.NewSource(1))
@@ -218,16 +270,22 @@ func TestRandomDynamicsStayBounded(t *testing.T) {
 		for step := 0; step < 100; step++ {
 			e.SrcFires += int64(rng.Intn(30))
 			e.DstFires += int64(rng.Intn(30))
-			switch rng.Intn(3) {
+			switch rng.Intn(4) {
 			case 0:
 				Potentiate(e, rng.Float64(), rng.Float64(), t0, p)
 			case 1:
 				Depress(e, rng.Float64(), rng.Float64(), t0, p)
 			case 2:
+				Scale(e, rng.Float64(), p)
+			case 3:
 				Materialize(e, p)
 			}
 			w := EffectiveWeight(e, p)
-			if w < 0 || w > 1 || e.Stability <= 0 || e.Stability > p.MaxStability {
+			floor := 0.0
+			if e.Coactivations > 0 {
+				floor = p.AssocWeightFloor
+			}
+			if w < floor-1e-12 || w > 1 || e.Stability <= 0 || e.Stability > p.MaxStability {
 				t.Fatalf("trial %d step %d: w=%g S=%g", trial, step, w, e.Stability)
 			}
 		}

@@ -140,6 +140,7 @@ button:hover { border-color: var(--muted); }
 				<label><input type="radio" name="labels" value="auto" checked> Auto (no overlaps)</label>
 				<label><input type="radio" name="labels" value="all"> All</label>
 				<label><input type="radio" name="labels" value="none"> Selection only</label>
+				<label><input type="radio" name="labels" value="off"> Hidden</label>
 			</div>
 		</div>
 		<div class="buttons">
@@ -377,9 +378,12 @@ function tickComp(c, labels) {
 	}
 }
 
+// Whether the layout leaves room for labels ("auto" and "all" modes).
+function reserveLabels() { return state.labels === "auto" || state.labels === "all"; }
+
 // Animation step (after a drag or a reheat): components keep their places.
 function tick() {
-	const labels = state.labels !== "none";
+	const labels = reserveLabels();
 	for (const c of comps) if (c.nodes.length > 1) tickComp(c, labels);
 	alpha += (0 - alpha) * ALPHA_DECAY;
 }
@@ -432,7 +436,7 @@ function mulberry32(a) {
 function layoutAll() {
 	const rnd = mulberry32(seed);
 	findComponents();
-	const labels = state.labels !== "none";
+	const labels = reserveLabels();
 	for (const c of comps) {
 		const ns = c.nodes;
 		c.cx = c.cy = 0;
@@ -593,6 +597,7 @@ function draw() {
 // spot would cover another label or neuron. Forced labels (selection, its
 // neighbors, search hits, "All" mode) always show, in the least crowded spot.
 function drawLabels(focus, searching, lit) {
+	if (state.labels === "off") return;
 	const { x: vx, y: vy, k } = state.view;
 	const ox = W / 2 + vx, oy = H / 2 + vy;
 	const grid = new Map(), CELL = 64;
@@ -720,7 +725,7 @@ function fit(ns = visNodes, maxK = 1) {
 // World bounding box of neurons with their labels, labels scaled by ls
 // (world units per screen pixel).
 function bounds(ns, ls) {
-	const lab = state.labels !== "none";
+	const lab = reserveLabels();
 	let l = Infinity, t = Infinity, r = -Infinity, b = -Infinity;
 	for (const n of ns) {
 		const hh = Math.max(n.r, lab ? (LABEL_PX / 2 + 3) * ls : 0);

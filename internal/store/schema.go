@@ -144,4 +144,6 @@ CREATE TABLE events (
 CREATE INDEX events_session ON events(session, id);
 CREATE INDEX events_kind ON events(kind, id);
 `,
+	// prune_threshold was retired when pruning was replaced by weight floors.
+	`DELETE FROM params WHERE key = 'prune_threshold';`,
 }

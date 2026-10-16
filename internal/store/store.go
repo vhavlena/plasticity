@@ -418,12 +418,13 @@ func (t *Tx) EdgesOf(id string, limit int) ([]*model.Edge, error) {
 		) ORDER BY 4 DESC, 1, 2, 3 LIMIT ?`, id, id, id, limit))
 }
 
-// Degree returns the number of edges incident to id.
-func (t *Tx) Degree(id string) (int, error) {
-	var n int
-	err := t.tx.QueryRow(`SELECT (SELECT count(*) FROM edges WHERE src=?) + (SELECT count(*) FROM edges WHERE dst=? AND src<>?)`,
-		id, id, id).Scan(&n)
-	return n, err
+// WeightSum returns the summed stored weight of the edges incident to id.
+func (t *Tx) WeightSum(id string) (float64, error) {
+	var w float64
+	err := t.tx.QueryRow(`SELECT (SELECT coalesce(sum(weight), 0) FROM edges WHERE src=?) +
+		(SELECT coalesce(sum(weight), 0) FROM edges WHERE dst=? AND src<>?)`,
+		id, id, id).Scan(&w)
+	return w, err
 }
 
 // EdgeKey identifies an edge for paging.

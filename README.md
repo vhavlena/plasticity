@@ -65,9 +65,9 @@ importance.
 
 **Synapses** come in two kinds:
 - **associative** synapses are learned: symmetric, created and strengthened
-  only by co-use, and pruned when they fade;
+  only by co-use, and fade towards a small floor weight but are never removed;
 - **typed** synapses (`supports`, `derives_from`, `contradicts`, `part_of`,
-  `explicit`) are authored: directed, slowly decaying, never pruned.
+  `explicit`) are authored: directed, slowly decaying towards a floor weight.
 
 **Recall** runs in three steps:
 1. Seeds come from BM25 keyword search, fused with embedding similarity when
@@ -86,12 +86,14 @@ importance.
   markedly more stable.
 - **Weakening (LTD):** recalled-but-unused neurons lose weight on their links
   to the used ones.
-- **Homeostatic scaling:** stops hubs from taking over.
+- **Homeostatic scaling:** stops hubs from taking over by capping a
+  neuron's summed link weight above the floors.
 
 **Forgetting is counted in recalls, not days.** A synapse ages each time one
 endpoint is recalled without the other: `w = w₀·e^(−age/S)`. Unused parts of
-the graph never change, and a vacation erodes nothing. Consolidation prunes
-faded links and marks isolated, unused neurons dormant; dormant neurons stay
+the graph never change, and a vacation erodes nothing. Weakening (decay, LTD,
+scaling) never removes a link: it stops at a floor weight. Consolidation marks
+isolated, unused neurons dormant; dormant neurons stay
 searchable.
 
 **Storage** is a single SQLite file in WAL mode (pure Go, no server), so

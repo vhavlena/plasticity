@@ -38,24 +38,31 @@ type txGraph struct {
 	p  model.Params
 }
 
-func (g txGraph) Neighbors(id string) ([]retrieval.Neighbor, int, error) {
+// Neighbors returns the node's strongest EdgesPerNode edges and its fan load:
+// their summed effective weight plus, if the list was truncated, the stored
+// weight of the remaining edges (an upper bound of their effective weight).
+func (g txGraph) Neighbors(id string) ([]retrieval.Neighbor, float64, error) {
 	edges, err := g.tx.EdgesOf(id, g.p.EdgesPerNode)
 	if err != nil {
 		return nil, 0, err
 	}
-	deg := len(edges)
-	if deg == g.p.EdgesPerNode {
-		if deg, err = g.tx.Degree(id); err != nil {
-			return nil, 0, err
-		}
-	}
+	load, stored := 0.0, 0.0
 	out := make([]retrieval.Neighbor, 0, len(edges))
 	for _, ed := range edges {
+		stored += ed.Weight
 		if w := plasticity.EffectiveWeight(ed, g.p); w > 0 {
+			load += w
 			out = append(out, retrieval.Neighbor{ID: ed.Other(id), Weight: w, Kind: string(ed.Kind)})
 		}
 	}
-	return out, deg, nil
+	if len(edges) == g.p.EdgesPerNode {
+		total, err := g.tx.WeightSum(id)
+		if err != nil {
+			return nil, 0, err
+		}
+		load += max(0, total-stored)
+	}
+	return out, load, nil
 }
 
 // RecallRequest parameterizes a recall. Zero values select the defaults.

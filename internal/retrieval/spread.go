@@ -16,18 +16,20 @@ type Neighbor struct {
 	Kind   string
 }
 
-// Graph provides lazy access to the neighborhood of a node. Degree is the
-// total number of edges of the node (used for the fan effect), which may be
-// larger than len(neighbors) if the caller truncated the list.
+// Graph provides lazy access to the neighborhood of a node. Load is the
+// summed effective weight of all the node's edges (used for the fan effect),
+// which may exceed the weights in neighbors if the caller truncated the list.
+// Weighing the fan by strength rather than counting edges keeps faded links,
+// which are never removed, from diluting a node's strong ones.
 type Graph interface {
-	Neighbors(id string) (neighbors []Neighbor, degree int, err error)
+	Neighbors(id string) (neighbors []Neighbor, load float64, err error)
 }
 
 // SpreadConfig parameterizes spreading activation.
 type SpreadConfig struct {
 	HopDecay  float64 // δ: per-hop attenuation
 	Threshold float64 // θ: minimum activation for a node to be reached
-	FanK0     float64 // fan effect: divide by max(1, degree/K0)^β
+	FanK0     float64 // fan effect: divide by max(1, load/K0)^β
 	FanBeta   float64
 	MaxNodes  int // max distinct nodes expanded (neighborhoods loaded)
 	MaxHops   int // safety cap on path length
@@ -72,7 +74,7 @@ type memoGraph struct {
 
 type memoEntry struct {
 	nbrs []Neighbor
-	deg  int
+	load float64
 }
 
 // get returns the neighborhood of id, or ok=false if the budget is exhausted.
@@ -83,14 +85,15 @@ func (m *memoGraph) get(id string) (memoEntry, bool, error) {
 	if len(m.cache) >= m.budget {
 		return memoEntry{}, false, nil
 	}
-	nbrs, deg, err := m.g.Neighbors(id)
+	nbrs, load, err := m.g.Neighbors(id)
 	if err != nil {
 		return memoEntry{}, false, err
 	}
-	if deg < len(nbrs) {
-		deg = len(nbrs)
+	sum := 0.0
+	for _, nb := range nbrs {
+		sum += nb.Weight
 	}
-	e := memoEntry{nbrs: nbrs, deg: deg}
+	e := memoEntry{nbrs: nbrs, load: math.Max(load, sum)}
 	m.cache[id] = e
 	return e, true, nil
 }
@@ -100,7 +103,7 @@ func (m *memoGraph) get(id string) (memoEntry, bool, error) {
 //
 // For each seed, a best-first search (Dijkstra on −ln a) computes the
 // strongest path to every node, where traversing an edge of weight w from a
-// node of degree k multiplies the activation by
+// node of load k (summed edge weight) multiplies the activation by
 //
 //	δ · w / max(1, k/K0)^β.
 //
@@ -154,7 +157,7 @@ func Spread(g Graph, seeds map[string]float64, cfg SpreadConfig) (*Result, error
 			if !ok {
 				continue // budget exhausted: node stays a leaf
 			}
-			fan := math.Pow(math.Max(1, float64(e.deg)/cfg.FanK0), cfg.FanBeta)
+			fan := math.Pow(math.Max(1, e.load/cfg.FanK0), cfg.FanBeta)
 			for _, nb := range e.nbrs {
 				a := it.a * cfg.HopDecay * nb.Weight / fan
 				if a < cfg.Threshold || a <= run.a[nb.ID] {

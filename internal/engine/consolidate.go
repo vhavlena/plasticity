@@ -21,46 +21,39 @@ const batchSize = 500
 // ConsolidateReport summarizes a consolidation ("sleep") pass.
 type ConsolidateReport struct {
 	EdgesScanned int   `json:"edges_scanned"`
-	Pruned       int   `json:"pruned"`
 	Scaled       int   `json:"scaled_nodes"`
 	Dormant      int   `json:"marked_dormant"`
 	Woken        int   `json:"woken"`
 	TracesPurged int64 `json:"traces_purged"`
 }
 
-// Consolidate prunes synapses weakened by interference, applies homeostatic
-// scaling, updates node dormancy and purges old traces. Decay itself needs
-// no sweep: it is a function of the endpoints' fire counts.
-func (e *Engine) Consolidate(pruneTyped bool) (*ConsolidateReport, error) {
+// Consolidate applies homeostatic scaling, updates node dormancy and purges
+// old traces. Decay itself needs no sweep: it is a function of the
+// endpoints' fire counts. Synapses are never removed: weakening stops at
+// their weight floor.
+func (e *Engine) Consolidate() (*ConsolidateReport, error) {
 	rep := &ConsolidateReport{}
 
-	// 1. One pass over all edges: prune, and record each node's degree and
-	// summed associative weight among the surviving edges, so that steps 2
-	// and 3 need no per-node queries. (Edges written concurrently during
-	// consolidation may be missed; dormancy and scaling are advisory and
-	// catch up on the next run.)
+	// 1. One pass over all edges: record each node's degree and summed
+	// associative weight above the floors, so that steps 2 and 3 need no
+	// per-node queries. (Edges written concurrently during consolidation may
+	// be missed; dormancy and scaling are advisory and catch up on the next
+	// run.)
 	degree := map[string]int{}
 	assocSum := map[string]float64{}
 	var after store.EdgeKey
 	for {
 		var page []*model.Edge
-		err := e.st.Write(func(tx *store.Tx) error {
+		err := e.st.Read(func(tx *store.Tx) error {
 			var err error
 			if page, err = tx.EdgesAfter(after, batchSize); err != nil {
 				return err
 			}
 			for _, ed := range page {
-				if plasticity.ShouldPrune(ed, e.P, pruneTyped) {
-					if _, err := tx.DeleteEdge(ed.Src, ed.Dst, ed.Kind); err != nil {
-						return err
-					}
-					rep.Pruned++
-					continue
-				}
 				degree[ed.Src]++
 				degree[ed.Dst]++
 				if !ed.Kind.Typed() {
-					w := plasticity.EffectiveWeight(ed, e.P)
+					w := plasticity.Excess(ed, e.P)
 					assocSum[ed.Src] += w
 					assocSum[ed.Dst] += w
 				}

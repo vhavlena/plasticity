@@ -104,7 +104,7 @@ func (e *Engine) homeostasis(tx *store.Tx, ids []string) (int, error) {
 		for _, ed := range edges {
 			if ed.Kind == model.KindAssociative {
 				assoc = append(assoc, ed)
-				total += plasticity.EffectiveWeight(ed, e.P)
+				total += plasticity.Excess(ed, e.P)
 			}
 		}
 		f := plasticity.ScaleFactor(total, e.P.MaxOutWeight)
@@ -112,8 +112,7 @@ func (e *Engine) homeostasis(tx *store.Tx, ids []string) (int, error) {
 			continue
 		}
 		for _, ed := range assoc {
-			plasticity.Materialize(ed, e.P)
-			ed.Weight *= f
+			plasticity.Scale(ed, f, e.P)
 			if err := tx.UpsertEdge(ed); err != nil {
 				return scaled, err
 			}

@@ -7,8 +7,10 @@
 //   - soft-bounded Hebbian potentiation (LTP) on co-activation,
 //   - anti-Hebbian depression (LTD) on negative feedback,
 //   - homeostatic synaptic scaling,
-//   - pruning of weak synapses,
 //   - ACT-R base-level activation of neurons over a global recall clock.
+//
+// Weakening (decay, depression, scaling) never removes a synapse: its weight
+// stays at or above a per-kind floor (see Floor).
 //
 // Wall-clock time plays no role: idle periods do not erode memory.
 package plasticity
@@ -29,15 +31,28 @@ func Retrievability(e *model.Edge) float64 {
 	return math.Exp(-float64(e.Age()) / e.Stability)
 }
 
-// EffectiveWeight is the current (decayed) weight of e. Associative edges
-// decay towards 0; typed edges towards min(w0, TypedWeightFloor).
-func EffectiveWeight(e *model.Edge, p model.Params) float64 {
-	r := Retrievability(e)
-	if !e.Kind.Typed() {
-		return clamp01(e.Weight * r)
+// Floor is the weight below which weakening never pushes e:
+// min(w, AssocWeightFloor) for associative edges and min(w, TypedWeightFloor)
+// for typed ones, so an edge created weaker than its floor is not raised.
+func Floor(e *model.Edge, p model.Params) float64 {
+	floor := p.AssocWeightFloor
+	if e.Kind.Typed() {
+		floor = p.TypedWeightFloor
 	}
-	floor := math.Min(e.Weight, p.TypedWeightFloor)
-	return clamp01(floor + (e.Weight-floor)*r)
+	return math.Min(e.Weight, floor)
+}
+
+// EffectiveWeight is the current (decayed) weight of e: it decays from w0
+// towards Floor.
+func EffectiveWeight(e *model.Edge, p model.Params) float64 {
+	floor := Floor(e, p)
+	return clamp01(floor + (e.Weight-floor)*Retrievability(e))
+}
+
+// Excess is the part of e's effective weight above its floor: the share that
+// homeostatic scaling budgets and can take away.
+func Excess(e *model.Edge, p model.Params) float64 {
+	return EffectiveWeight(e, p) - Floor(e, p)
 }
 
 // Materialize folds the decay into Weight and resets the age to 0 by moving
@@ -80,6 +95,7 @@ func NewTyped(src, dst string, kind model.EdgeKind, weight float64, fs, fd int64
 // ai, aj ∈ [0,1]:
 //
 //	w ← w + η·a_i·a_j·(1 − w)               (soft bound: w stays < 1)
+//	w ← max(w, AssocWeightFloor)            (associative edges only)
 //	S ← S·(1 + α·(g + 1 − R))               (spacing effect)
 //
 // where R is the retrievability just before the event: reinforcing a link
@@ -92,6 +108,9 @@ func Potentiate(e *model.Edge, ai, aj float64, now time.Time, p model.Params) {
 	}
 	Materialize(e, p)
 	e.Weight = clamp01(e.Weight + p.LearningRate*clamp01(ai)*clamp01(aj)*(1-e.Weight))
+	if !e.Kind.Typed() {
+		e.Weight = math.Max(e.Weight, p.AssocWeightFloor)
+	}
 	e.Stability = math.Min(p.MaxStability, e.Stability*(1+p.StabilityGrowth*(p.MinStabilityGain+1-r)))
 	e.Coactivations++
 	e.LastUpdate = now
@@ -99,31 +118,39 @@ func Potentiate(e *model.Edge, ai, aj float64, now time.Time, p model.Params) {
 
 // Depress applies anti-Hebbian long-term depression:
 //
-//	w ← w − η_d·a_i·a_j·w
+//	w ← max(Floor, w − η_d·a_i·a_j·w)
 //
 // Stability is not changed.
 func Depress(e *model.Edge, ai, aj float64, now time.Time, p model.Params) {
 	Materialize(e, p)
-	e.Weight = clamp01(e.Weight - p.DepressionRate*clamp01(ai)*clamp01(aj)*e.Weight)
+	floor := Floor(e, p)
+	e.Weight = math.Max(floor, clamp01(e.Weight-p.DepressionRate*clamp01(ai)*clamp01(aj)*e.Weight))
 	e.LastUpdate = now
 }
 
+// Scale multiplies e's Excess by the homeostatic factor f:
+//
+//	w ← Floor + (w − Floor)·f
+//
+// so scaling never takes an edge below its floor, and an edge at the floor
+// is left unchanged.
+func Scale(e *model.Edge, f float64, p model.Params) {
+	Materialize(e, p)
+	floor := Floor(e, p)
+	e.Weight = floor + (e.Weight-floor)*f
+}
+
 // ScaleFactor returns the multiplicative homeostatic factor for a node whose
-// summed associative weight is total: min(1, maxOut/total).
+// summed associative Excess is total: min(1, maxOut/total). Floor weight is
+// left out of the budget, so links that faded to their floor neither trigger
+// scaling nor force it onto the node's strong links, and one Scale pass with
+// this factor brings the node to maxOut. A relative tolerance absorbs the
+// rounding left by that pass, so a node at the budget is not rescaled again.
 func ScaleFactor(total, maxOut float64) float64 {
-	if total <= maxOut || total <= 0 {
+	if total <= maxOut*(1+1e-9) || total <= 0 {
 		return 1
 	}
 	return maxOut / total
-}
-
-// ShouldPrune reports whether e is too weak to keep. Typed edges are only
-// pruned when pruneTyped is set.
-func ShouldPrune(e *model.Edge, p model.Params, pruneTyped bool) bool {
-	if e.Kind.Typed() && !pruneTyped {
-		return false
-	}
-	return EffectiveWeight(e, p) < p.PruneThreshold
 }
 
 // BaseLevel is the ACT-R base-level activation B = ln Σ_j t_j^−d, where t_j is

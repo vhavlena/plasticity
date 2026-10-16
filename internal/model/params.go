@@ -43,19 +43,20 @@ type Params struct {
 	MinStabilityGain float64 `json:"min_stability_gain"`
 	// MaxStability caps S.
 	MaxStability float64 `json:"max_stability"`
+	// AssocWeightFloor is the weight associative edges decay towards: decay,
+	// depression and scaling never weaken a learned link below it, so links
+	// are never removed by weakening.
+	AssocWeightFloor float64 `json:"assoc_weight_floor"`
 	// TypedWeightFloor is the weight typed edges decay towards (never below).
 	TypedWeightFloor float64 `json:"typed_weight_floor"`
 	// DefaultTypedWeight is the weight of a newly linked typed edge.
 	DefaultTypedWeight float64 `json:"default_typed_weight"`
 
-	// --- Homeostasis and pruning ---
+	// --- Homeostasis ---
 
-	// MaxOutWeight caps the summed associative weight around one node
-	// (homeostatic synaptic scaling).
+	// MaxOutWeight caps the summed associative weight above the floors
+	// around one node (homeostatic synaptic scaling).
 	MaxOutWeight float64 `json:"max_out_weight"`
-	// PruneThreshold: associative edges whose effective weight falls below it
-	// are removed during consolidation.
-	PruneThreshold float64 `json:"prune_threshold"`
 
 	// --- ACT-R base-level activation ---
 
@@ -89,8 +90,9 @@ type Params struct {
 	HopDecay float64 `json:"hop_decay"`
 	// FiringThreshold is θ: a node is reached only if its activation ≥ θ.
 	FiringThreshold float64 `json:"firing_threshold"`
-	// FanK0 and FanBeta implement the fan effect: a node of degree k passes
-	// activation divided by max(1, k/K0)^β.
+	// FanK0 and FanBeta implement the fan effect: a node whose edges have
+	// summed effective weight k passes activation divided by max(1, k/K0)^β
+	// (K0 ≈ that many full-strength links), so faded links barely count.
 	FanK0   float64 `json:"fan_k0"`
 	FanBeta float64 `json:"fan_beta"`
 	// MaxNodes caps the number of distinct nodes expanded per recall.
@@ -152,11 +154,11 @@ func DefaultParams() Params {
 		StabilityGrowth:    1.0,
 		MinStabilityGain:   0.2,
 		MaxStability:       10000,
+		AssocWeightFloor:   0.05,
 		TypedWeightFloor:   0.3,
 		DefaultTypedWeight: 0.8,
 
-		MaxOutWeight:   5,
-		PruneThreshold: 0.05,
+		MaxOutWeight: 5,
 
 		ActrDecay:        0.5,
 		MaxAccessRecords: 50,
@@ -201,7 +203,7 @@ func (p Params) Validate() error {
 	in01 := map[string]float64{
 		"learning_rate": p.LearningRate, "depression_rate": p.DepressionRate,
 		"typed_weight_floor": p.TypedWeightFloor, "default_typed_weight": p.DefaultTypedWeight,
-		"prune_threshold": p.PruneThreshold, "hop_decay": p.HopDecay,
+		"assoc_weight_floor": p.AssocWeightFloor, "hop_decay": p.HopDecay,
 		"firing_threshold": p.FiringThreshold, "ppr_restart": p.PPRRestart,
 		"absent_term_weight": p.AbsentTermWeight, "min_seed_strength": p.MinSeedStrength,
 		"context_link_weight": p.ContextLinkWeight, "dedupe_cos": p.DedupeCos,

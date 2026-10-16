@@ -499,16 +499,14 @@ func (a *app) feedbackCmd() *cobra.Command {
 }
 
 func (a *app) consolidateCmd() *cobra.Command {
-	var pruneTyped bool
 	c := &cobra.Command{
 		Use:   "consolidate",
-		Short: "Sleep phase: apply decay, prune weak synapses, homeostatic scaling, dormancy",
+		Short: "Sleep phase: homeostatic scaling, dormancy, trace purge",
 		Args:  cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
-			return a.with(func(e *engine.Engine) (any, error) { return e.Consolidate(pruneTyped) })
+			return a.with(func(e *engine.Engine) (any, error) { return e.Consolidate() })
 		},
 	}
-	c.Flags().BoolVar(&pruneTyped, "prune-typed", false, "also prune weak typed (explicit) edges")
 	return c
 }
 

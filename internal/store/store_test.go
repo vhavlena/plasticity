@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -132,11 +133,13 @@ func TestEdgesCanonicalAndCascade(t *testing.T) {
 		if len(edges) != 2 || edges[0].Kind != model.KindSupports {
 			t.Fatalf("EdgesOf(a) = %+v", edges)
 		}
-		if d, _ := tx.Degree("a"); d != 2 {
-			t.Fatalf("degree(a) = %d", d)
+		wa, _ := tx.WeightSum("a")
+		wb, _ := tx.WeightSum("b")
+		if math.Abs(wa-1.4) > 1e-9 {
+			t.Fatalf("WeightSum(a) = %g, want 1.4", wa)
 		}
-		if d, _ := tx.Degree("b"); d != 1 {
-			t.Fatalf("degree(b) = %d", d)
+		if math.Abs(wb-0.5) > 1e-9 {
+			t.Fatalf("WeightSum(b) = %g, want 0.5", wb)
 		}
 		page, _ := tx.EdgesAfter(EdgeKey{}, 1)
 		page2, _ := tx.EdgesAfter(EdgeKey{page[0].Src, page[0].Dst, page[0].Kind}, 10)
@@ -476,6 +479,35 @@ func TestSessionsAndEvents(t *testing.T) {
 		}
 		if n, _ := tx.CountEndedSessions(); n != 1 {
 			t.Fatalf("ended sessions: %d", n)
+		}
+		return nil
+	})
+}
+
+// A database from before pruning was retired may store a prune_threshold
+// override; migrating removes it so that the remaining params still load.
+func TestMigrationDropsRetiredPruneThreshold(t *testing.T) {
+	s, path := openTest(t)
+	mustWrite(t, s, func(tx *Tx) error {
+		if err := tx.SetParam("prune_threshold", "0.1"); err != nil {
+			return err
+		}
+		if err := tx.SetParam("hop_decay", "0.7"); err != nil {
+			return err
+		}
+		_, err := tx.tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, len(migrations)-1))
+		return err
+	})
+	s.Close()
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	_ = s2.Read(func(tx *Tx) error {
+		p, err := tx.LoadParams()
+		if err != nil || p.HopDecay != 0.7 {
+			t.Fatalf("LoadParams after migration: %v, hop_decay %g", err, p.HopDecay)
 		}
 		return nil
 	})
