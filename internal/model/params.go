@@ -54,8 +54,8 @@ type Params struct {
 
 	// --- Homeostasis ---
 
-	// MaxOutWeight caps the summed associative weight around one node
-	// (homeostatic synaptic scaling).
+	// MaxOutWeight caps the summed associative weight above the floors
+	// around one node (homeostatic synaptic scaling).
 	MaxOutWeight float64 `json:"max_out_weight"`
 
 	// --- ACT-R base-level activation ---
@@ -90,8 +90,9 @@ type Params struct {
 	HopDecay float64 `json:"hop_decay"`
 	// FiringThreshold is θ: a node is reached only if its activation ≥ θ.
 	FiringThreshold float64 `json:"firing_threshold"`
-	// FanK0 and FanBeta implement the fan effect: a node of degree k passes
-	// activation divided by max(1, k/K0)^β.
+	// FanK0 and FanBeta implement the fan effect: a node whose edges have
+	// summed effective weight k passes activation divided by max(1, k/K0)^β
+	// (K0 ≈ that many full-strength links), so faded links barely count.
 	FanK0   float64 `json:"fan_k0"`
 	FanBeta float64 `json:"fan_beta"`
 	// MaxNodes caps the number of distinct nodes expanded per recall.

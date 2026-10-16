@@ -20,9 +20,13 @@ func (g *mapGraph) link(a, b string, w float64) *mapGraph {
 	return g
 }
 
-func (g *mapGraph) Neighbors(id string) ([]Neighbor, int, error) {
+func (g *mapGraph) Neighbors(id string) ([]Neighbor, float64, error) {
 	g.calls++
-	return g.adj[id], len(g.adj[id]), nil
+	load := 0.0
+	for _, nb := range g.adj[id] {
+		load += nb.Weight
+	}
+	return g.adj[id], load, nil
 }
 
 func cfg() SpreadConfig {
@@ -58,8 +62,8 @@ func TestStrongConnectionsReachDeeper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The seed has degree 3 < K0, so no fan penalty. Per-hop factor is
-	// 0.8·w; but interior chain nodes have degree 2, also no penalty.
+	// The seed has load 1.8 < K0, so no fan penalty. Per-hop factor is
+	// 0.8·w; interior chain nodes have load ≤ 1.8, also no penalty.
 	want := map[string]int{
 		"strong": int(math.Floor(math.Log(0.1) / math.Log(0.72))), // 7
 		"mid":    int(math.Floor(math.Log(0.1) / math.Log(0.48))), // 3
@@ -128,6 +132,18 @@ func TestHubFanEffect(t *testing.T) {
 	}
 	if hc != nil && !(hc.Score < lc.Score) {
 		t.Fatalf("hub children (%g) should be dampened below lean child (%g)", hc.Score, lc.Score)
+	}
+}
+
+func TestFadedLinksDoNotDiluteFan(t *testing.T) {
+	g := newGraph().link("seed", "strong", 0.9)
+	for i := 0; i < 100; i++ {
+		g.link("seed", fmt.Sprintf("faded%d", i), 0.05)
+	}
+	res, _ := Spread(g, map[string]float64{"seed": 1}, cfg())
+	// Load 0.9 + 100·0.05 = 5.9 < K0: 100 faded links impose no fan penalty.
+	if got, want := res.Activations["strong"].Score, 0.8*0.9; math.Abs(got-want) > 1e-9 {
+		t.Fatalf("strong neighbor activation %g, want %g", got, want)
 	}
 }
 

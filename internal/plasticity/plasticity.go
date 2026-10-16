@@ -6,11 +6,11 @@
 //     a spacing-effect stability (FSRS-style),
 //   - soft-bounded Hebbian potentiation (LTP) on co-activation,
 //   - anti-Hebbian depression (LTD) on negative feedback,
-//   - homeostatic synaptic scaling.
+//   - homeostatic synaptic scaling,
+//   - ACT-R base-level activation of neurons over a global recall clock.
 //
 // Weakening (decay, depression, scaling) never removes a synapse: its weight
 // stays at or above a per-kind floor (see Floor).
-//   - ACT-R base-level activation of neurons over a global recall clock.
 //
 // Wall-clock time plays no role: idle periods do not erode memory.
 package plasticity
@@ -47,6 +47,12 @@ func Floor(e *model.Edge, p model.Params) float64 {
 func EffectiveWeight(e *model.Edge, p model.Params) float64 {
 	floor := Floor(e, p)
 	return clamp01(floor + (e.Weight-floor)*Retrievability(e))
+}
+
+// Excess is the part of e's effective weight above its floor: the share that
+// homeostatic scaling budgets and can take away.
+func Excess(e *model.Edge, p model.Params) float64 {
+	return EffectiveWeight(e, p) - Floor(e, p)
 }
 
 // Materialize folds the decay into Weight and resets the age to 0 by moving
@@ -122,16 +128,26 @@ func Depress(e *model.Edge, ai, aj float64, now time.Time, p model.Params) {
 	e.LastUpdate = now
 }
 
-// Scale multiplies e's weight by the homeostatic factor f, not below Floor.
+// Scale multiplies e's Excess by the homeostatic factor f:
+//
+//	w ← Floor + (w − Floor)·f
+//
+// so scaling never takes an edge below its floor, and an edge at the floor
+// is left unchanged.
 func Scale(e *model.Edge, f float64, p model.Params) {
 	Materialize(e, p)
-	e.Weight = math.Max(Floor(e, p), e.Weight*f)
+	floor := Floor(e, p)
+	e.Weight = floor + (e.Weight-floor)*f
 }
 
 // ScaleFactor returns the multiplicative homeostatic factor for a node whose
-// summed associative weight is total: min(1, maxOut/total).
+// summed associative Excess is total: min(1, maxOut/total). Floor weight is
+// left out of the budget, so links that faded to their floor neither trigger
+// scaling nor force it onto the node's strong links, and one Scale pass with
+// this factor brings the node to maxOut. A relative tolerance absorbs the
+// rounding left by that pass, so a node at the budget is not rescaled again.
 func ScaleFactor(total, maxOut float64) float64 {
-	if total <= maxOut || total <= 0 {
+	if total <= maxOut*(1+1e-9) || total <= 0 {
 		return 1
 	}
 	return maxOut / total

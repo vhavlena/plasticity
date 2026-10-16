@@ -190,7 +190,7 @@ func TestAssociativeWeakeningStopsAtFloor(t *testing.T) {
 		t.Fatalf("depressed to %g, want floor %g", strong.Weight, p.AssocWeightFloor)
 	}
 	scaled := assoc(0.5, 7)
-	Scale(scaled, 1e-6, p)
+	Scale(scaled, 0, p)
 	if !approx(scaled.Weight, p.AssocWeightFloor) {
 		t.Fatalf("scaled to %g, want floor %g", scaled.Weight, p.AssocWeightFloor)
 	}
@@ -217,6 +217,46 @@ func TestBaseLevel(t *testing.T) {
 	}
 	if !approx(BaseLevel([]int64{1000}, 1000, 0.5), 0) {
 		t.Fatal("access at the current tick should give B=0")
+	}
+}
+
+// Floor-weight links are outside the homeostatic budget: a hub with many
+// faded links is not scaled, and one with strong links too is brought to the
+// budget in one pass without its faded links absorbing the cut.
+func TestScalingIgnoresFloorWeight(t *testing.T) {
+	p := model.DefaultParams()
+	var edges []*model.Edge
+	for i := 0; i < 200; i++ {
+		edges = append(edges, assoc(p.AssocWeightFloor, 7))
+	}
+	excess := func() float64 {
+		sum := 0.0
+		for _, e := range edges {
+			sum += Excess(e, p)
+		}
+		return sum
+	}
+	if f := ScaleFactor(excess(), p.MaxOutWeight); f != 1 {
+		t.Fatalf("faded links alone trigger scaling: f=%g", f)
+	}
+	for i := 0; i < 10; i++ {
+		edges = append(edges, assoc(0.9, 7))
+	}
+	f := ScaleFactor(excess(), p.MaxOutWeight)
+	for _, e := range edges {
+		Scale(e, f, p)
+	}
+	if got := excess(); !approx(got, p.MaxOutWeight) {
+		t.Fatalf("excess after one pass %g, want %g", got, p.MaxOutWeight)
+	}
+	if f := ScaleFactor(excess(), p.MaxOutWeight); f != 1 {
+		t.Fatalf("second pass rescales: f=%g", f)
+	}
+	if want := p.AssocWeightFloor + p.MaxOutWeight/10; !approx(edges[len(edges)-1].Weight, want) {
+		t.Fatalf("strong link scaled to %g, want %g", edges[len(edges)-1].Weight, want)
+	}
+	if !approx(edges[0].Weight, p.AssocWeightFloor) {
+		t.Fatalf("faded link changed to %g", edges[0].Weight)
 	}
 }
 

@@ -269,12 +269,13 @@ func TestHomeostasisBoundsHub(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The budget covers the weight above the floors.
 	total := 0.0
 	for _, ed := range v.Edges {
-		total += ed.Weight
+		total += ed.Weight - f.e.P.AssocWeightFloor
 	}
 	if len(v.Edges) != 15 || total > f.e.P.MaxOutWeight+1e-9 {
-		t.Fatalf("hub total weight %g over %d edges exceeds %g", total, len(v.Edges), f.e.P.MaxOutWeight)
+		t.Fatalf("hub weight above floor %g over %d edges exceeds %g", total, len(v.Edges), f.e.P.MaxOutWeight)
 	}
 }
 

@@ -35,9 +35,10 @@ func (e *Engine) Consolidate() (*ConsolidateReport, error) {
 	rep := &ConsolidateReport{}
 
 	// 1. One pass over all edges: record each node's degree and summed
-	// associative weight, so that steps 2 and 3 need no per-node queries. (Edges written concurrently during
-	// consolidation may be missed; dormancy and scaling are advisory and
-	// catch up on the next run.)
+	// associative weight above the floors, so that steps 2 and 3 need no
+	// per-node queries. (Edges written concurrently during consolidation may
+	// be missed; dormancy and scaling are advisory and catch up on the next
+	// run.)
 	degree := map[string]int{}
 	assocSum := map[string]float64{}
 	var after store.EdgeKey
@@ -52,7 +53,7 @@ func (e *Engine) Consolidate() (*ConsolidateReport, error) {
 				degree[ed.Src]++
 				degree[ed.Dst]++
 				if !ed.Kind.Typed() {
-					w := plasticity.EffectiveWeight(ed, e.P)
+					w := plasticity.Excess(ed, e.P)
 					assocSum[ed.Src] += w
 					assocSum[ed.Dst] += w
 				}

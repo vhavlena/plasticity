@@ -86,7 +86,8 @@ importance.
   markedly more stable.
 - **Weakening (LTD):** recalled-but-unused neurons lose weight on their links
   to the used ones.
-- **Homeostatic scaling:** stops hubs from taking over.
+- **Homeostatic scaling:** stops hubs from taking over by capping a
+  neuron's summed link weight above the floors.
 
 **Forgetting is counted in recalls, not days.** A synapse ages each time one
 endpoint is recalled without the other: `w = w₀·e^(−age/S)`. Unused parts of
