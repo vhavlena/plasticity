@@ -609,3 +609,39 @@ func TestNoLog(t *testing.T) {
 		t.Fatalf("PLASTICITY_LOG=false: %d events", n)
 	}
 }
+
+// add warns (on stderr and in the result) when no importance is given, also
+// for a node on stdin; an explicit importance, even 0, is silent.
+func TestAddWarnsWithoutImportance(t *testing.T) {
+	c := newCLI(t)
+	add := func(stdin string, args ...string) (warning, stderr string) {
+		t.Helper()
+		cmd := exec.Command(binary, append([]string{"--db", c.db, "--no-log", "add"}, args...)...)
+		cmd.Stdin = strings.NewReader(stdin)
+		var errb strings.Builder
+		cmd.Stderr = &errb
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("add %v: %v %s", args, err, errb.String())
+		}
+		var res struct {
+			Warning string `json:"warning"`
+		}
+		if err := json.Unmarshal(out, &res); err != nil {
+			t.Fatalf("add output %s: %v", out, err)
+		}
+		return res.Warning, errb.String()
+	}
+	if w, e := add("", "--title", "No importance"); !strings.Contains(w, "importance not set") || !strings.Contains(e, "importance not set") {
+		t.Fatalf("missing warning: %q / %q", w, e)
+	}
+	if w, e := add("", "--title", "With importance", "--importance", "0"); w != "" || strings.Contains(e, "importance") {
+		t.Fatalf("explicit importance warned: %q / %q", w, e)
+	}
+	if w, _ := add(`{"title": "From stdin"}`, "--stdin"); !strings.Contains(w, "importance not set") {
+		t.Fatalf("stdin without importance: %q", w)
+	}
+	if w, _ := add(`{"title": "From stdin, weighted", "importance": 0.6}`, "--stdin"); w != "" {
+		t.Fatalf("stdin with importance warned: %q", w)
+	}
+}

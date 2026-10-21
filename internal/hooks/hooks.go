@@ -200,7 +200,7 @@ Run every plasticity command as %s ... (it selects this session's memory).
   %s recall "<specific question or error>" --session %s
 - Store durable knowledge (decisions with rationale, root causes, working procedures, preferences):
   %s add -t decision|fact|procedure|concept|rationale|question --title "..." -c "..." -r "why" --importance 0..1 --session %s
-  (importance: 0.8-1 user preferences/corrections and costly decisions or root causes, 0.4-0.7 useful facts and procedures, 0.1-0.3 minor details;
+  (importance, always pass it, the CLI warns if omitted: 0.8-1 user preferences/corrections and costly decisions or root causes, 0.4-0.7 useful facts and procedures, 0.1-0.3 minor details;
   add --supersedes OLD_ID when the new neuron replaces an outdated one;
   --tags global for knowledge shared across projects: preferences, tool tips, shared infrastructure)
 - Report memories you actually used (also ones you found via plasticity search/recall):

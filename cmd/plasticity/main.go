@@ -180,12 +180,19 @@ prompt hook no longer injects them and recall redirects to the new neuron. The
 result lists "similar" existing neurons; if one of them is outdated, mark it with
 'update ID --superseded-by NEW' (or update its content if it is partly true).`,
 		Args: cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			n := &model.Node{Type: model.NodeType(f.typ), Title: f.title, Content: f.content,
 				Rationale: f.rationale, Tags: f.tags, Source: f.source, Importance: f.importance}
+			importanceSet := cmd.Flags().Changed("importance")
 			if stdin {
+				var raw map[string]json.RawMessage
+				if err := json.NewDecoder(a.in).Decode(&raw); err != nil {
+					return fmt.Errorf("decode node from stdin: %w", err)
+				}
+				_, importanceSet = raw["importance"]
+				b, _ := json.Marshal(raw)
 				n = &model.Node{Type: model.TypeFact}
-				if err := json.NewDecoder(a.in).Decode(n); err != nil {
+				if err := json.Unmarshal(b, n); err != nil {
 					return fmt.Errorf("decode node from stdin: %w", err)
 				}
 			}
@@ -202,6 +209,12 @@ result lists "similar" existing neurons; if one of them is outdated, mark it wit
 				res, err := e.AddNodeChecked(n, opt)
 				if err != nil || res.Node == nil {
 					return res, err
+				}
+				// Importance stays 0 by default (stored data keeps its meaning),
+				// but a forgotten one is the most common way a neuron is mis-weighted.
+				if !importanceSet {
+					res.Warning = importanceWarning
+					e.Warnings = append(e.Warnings, importanceWarning)
 				}
 				for _, l := range specs {
 					if _, err := e.Link(res.Node.ID, l.dst, l.kind, l.weight); err != nil {
@@ -220,6 +233,8 @@ result lists "similar" existing neurons; if one of them is outdated, mark it wit
 	c.Flags().StringSliceVar(&opt.Supersedes, "supersedes", nil, "IDs of neurons the new one replaces (they are no longer injected)")
 	return c
 }
+
+const importanceWarning = "importance not set: pass --importance 0..1"
 
 func (a *app) usedCmd() *cobra.Command {
 	var session string

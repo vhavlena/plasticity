@@ -302,6 +302,8 @@ type AddResult struct {
 	// to the new one; Hint says what to do if one of them is outdated.
 	Similar []SimilarNeuron `json:"similar,omitempty"`
 	Hint    string          `json:"hint,omitempty"`
+	// Warning flags a questionable add, e.g. one without an importance.
+	Warning string `json:"warning,omitempty"`
 }
 
 // AddNodeChecked adds a neuron after a duplicate check (same normalized

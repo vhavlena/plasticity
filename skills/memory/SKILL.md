@@ -49,7 +49,8 @@ plasticity add -t decision --title "Use SQLite WAL for storage" \
   | 0.4–0.7 | useful project facts, working procedures, ordinary decisions |
   | 0.1–0.3 | minor details, open questions, context that is nice to have |
 
-  Adjust it later with `plasticity update ID --importance X` when its weight changes.
+  Always pass it; the CLI warns if you forget. Adjust it later with
+  `plasticity update ID --importance X` when its weight changes.
 - **One idea per neuron.** Several ideas → several `add` calls; link them with
   `--link ID:kind` (`supports`, `derives_from`, `contradicts`, `part_of`, `explicit`).
 - `--session` links the neuron to what this session already used or created.
