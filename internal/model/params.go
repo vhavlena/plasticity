@@ -16,6 +16,18 @@ type Params struct {
 	LearningRate float64 `json:"learning_rate"`
 	// DepressionRate is η_d in Δw = −η_d·a_i·a_j·w (anti-Hebbian feedback).
 	DepressionRate float64 `json:"depression_rate"`
+	// LTDAllLinks selects which links feedback weakens for a recalled but
+	// unused neuron: 0 (default) only the last hop of the path that
+	// activated it (none if it was a seed), at full rate if that path
+	// contains a used neuron and at LTDIndirectFactor otherwise; 1 every
+	// link between it and a used neuron (the behavior before 0.5).
+	LTDAllLinks       int     `json:"ltd_all_links"`
+	LTDIndirectFactor float64 `json:"ltd_indirect_factor"`
+	// RecallAccessWeight is the ACT-R access weight of a recall hit (a use or
+	// a creation weighs 1). Only hits of recalls with confidence ≥
+	// learn_min_confidence that are not foreign to the recall's project
+	// record an access, and only they fire.
+	RecallAccessWeight float64 `json:"recall_access_weight"`
 	// LearnMinConfidence: a recall stores a trace for Hebbian learning only
 	// if its query confidence is at least this.
 	LearnMinConfidence float64 `json:"learn_min_confidence"`
@@ -181,6 +193,10 @@ func DefaultParams() Params {
 	return Params{
 		LearningRate:   0.2,
 		DepressionRate: 0.15,
+
+		LTDIndirectFactor:  0.5,
+		RecallAccessWeight: 0.2,
+
 		ReinforceTopK:  12,
 		TraceRetention: 1000,
 
@@ -260,6 +276,7 @@ func (p Params) Validate() error {
 		"lexical_cos_low": p.LexicalCosLow, "lexical_cos_high": p.LexicalCosHigh,
 		"superseded_factor": p.SupersededFactor, "foreign_project_factor": p.ForeignProjectFactor,
 		"foreign_project_factor_explicit": p.ForeignProjectFactorExplicit,
+		"ltd_indirect_factor":             p.LTDIndirectFactor, "recall_access_weight": p.RecallAccessWeight,
 	}
 	for k, v := range in01 {
 		if v < 0 || v > 1 {
@@ -270,6 +287,9 @@ func (p Params) Validate() error {
 		"initial_stability": p.InitialStability, "typed_stability": p.TypedStability,
 		"max_stability": p.MaxStability, "max_out_weight": p.MaxOutWeight,
 		"fan_k0": p.FanK0, "actr_decay": p.ActrDecay,
+	}
+	if p.LTDAllLinks != 0 && p.LTDAllLinks != 1 {
+		return fmt.Errorf("ltd_all_links must be 0 or 1, got %d", p.LTDAllLinks)
 	}
 	if p.MinMatchedIDFShare < 0 {
 		return fmt.Errorf("min_matched_idf_share must be ≥ 0, got %g", p.MinMatchedIDFShare)

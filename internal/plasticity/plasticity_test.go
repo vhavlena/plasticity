@@ -206,17 +206,30 @@ func TestScaleFactor(t *testing.T) {
 }
 
 func TestBaseLevel(t *testing.T) {
+	at := func(ticks ...int64) []model.Access {
+		var a []model.Access
+		for _, tk := range ticks {
+			a = append(a, model.Access{Tick: tk, Weight: 1})
+		}
+		return a
+	}
 	if !math.IsInf(BaseLevel(nil, 100, 0.5), -1) || Sigmoid(math.Inf(-1)) != 0 {
 		t.Fatal("no accesses must give -Inf → 0")
 	}
-	recent := BaseLevel([]int64{999}, 1000, 0.5)
-	old := BaseLevel([]int64{900}, 1000, 0.5)
-	freq := BaseLevel([]int64{900, 910, 920}, 1000, 0.5)
+	recent := BaseLevel(at(999), 1000, 0.5)
+	old := BaseLevel(at(900), 1000, 0.5)
+	freq := BaseLevel(at(900, 910, 920), 1000, 0.5)
 	if !(recent > old) || !(freq > old) {
 		t.Fatalf("recency/frequency: %g %g %g", recent, old, freq)
 	}
-	if !approx(BaseLevel([]int64{1000}, 1000, 0.5), 0) {
+	if !approx(BaseLevel(at(1000), 1000, 0.5), 0) {
 		t.Fatal("access at the current tick should give B=0")
+	}
+	// Weighted: B = ln Σ w·t^−d, so a recall access of weight 0.2 counts a
+	// fifth of a use.
+	light := BaseLevel([]model.Access{{Tick: 999, Weight: 0.2}}, 1000, 0.5)
+	if !approx(light, math.Log(0.2)) || !approx(BaseLevel(append(at(999), model.Access{Tick: 999, Weight: 0.2}), 1000, 0.5), math.Log(1.2)) {
+		t.Fatalf("weighted base level: %g", light)
 	}
 }
 

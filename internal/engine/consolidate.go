@@ -140,7 +140,7 @@ func (e *Engine) updateDormancy(tx *store.Tx, ids []string, degree map[string]in
 	}
 	for _, id := range ids {
 		n := nodes[id]
-		b := plasticity.BaseLevel(append(acc[id], n.CreatedTick), now, e.P.ActrDecay)
+		b := plasticity.BaseLevel(acc[id], now, e.P.ActrDecay) // creation is an access
 		dormant := degree[id] == 0 && b < e.P.DormantBelow
 		if dormant == n.Dormant {
 			continue

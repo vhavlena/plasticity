@@ -202,9 +202,12 @@ func (e *Engine) ReinforceSession(session string) (*LearnReport, error) {
 }
 
 // Feedback tells the graph which nodes were actually useful in the session.
-// Used nodes are potentiated with each other (activation 1); nodes recalled
-// in the session's pending traces but not used are depressed (LTD) on their
-// existing associative links to the used nodes. Pending traces are deleted.
+// Used nodes are potentiated with each other (activation 1). For each node
+// recalled in the session's pending traces but not used, LTD weakens the
+// associative link that activated it: the last hop of its activation path,
+// at full rate if the path runs through a used node and at
+// LTDIndirectFactor otherwise; a seed weakens nothing (LTDAllLinks = 1
+// instead weakens all its links to used nodes). Pending traces are deleted.
 func (e *Engine) Feedback(session string, used []string) (*LearnReport, error) {
 	if len(used) == 0 {
 		return nil, fmt.Errorf("feedback needs at least one used node")
@@ -228,13 +231,15 @@ func (e *Engine) Feedback(session string, used []string) (*LearnReport, error) {
 		if err != nil {
 			return err
 		}
-		unused := map[string]float64{} // recalled but not used → max activation
+		unused := map[string]float64{}      // recalled but not used → max activation
+		unusedPath := map[string][]string{} // ... and the path of that activation
 		recallIDs := make([]string, 0, len(traces))
 		for _, tr := range traces {
 			recallIDs = append(recallIDs, tr.RecallID)
 			for _, en := range tr.Entries {
 				if !usedSet[en.NodeID] && en.Activation > unused[en.NodeID] {
 					unused[en.NodeID] = en.Activation
+					unusedPath[en.NodeID] = en.Path
 				}
 			}
 		}
@@ -244,20 +249,37 @@ func (e *Engine) Feedback(session string, used []string) (*LearnReport, error) {
 		if err := e.coactivate(tx, usedNodes, now, rep, touched); err != nil {
 			return err
 		}
+		depress := func(a, b string, ai, aj float64) error {
+			ed, err := tx.GetEdge(a, b, model.KindAssociative)
+			if err != nil || ed == nil {
+				return err
+			}
+			plasticity.Depress(ed, ai, aj, now, e.P)
+			rep.Depressed++
+			return tx.UpsertEdge(ed)
+		}
 		for _, r := range sortedKeys(unused) {
-			for _, u := range usedNodes {
-				ed, err := tx.GetEdge(r, u.id, model.KindAssociative)
-				if err != nil {
-					return err
+			if e.P.LTDAllLinks == 1 {
+				for _, u := range usedNodes {
+					if err := depress(r, u.id, unused[r], u.a); err != nil {
+						return err
+					}
 				}
-				if ed == nil {
-					continue
-				}
-				plasticity.Depress(ed, unused[r], u.a, now, e.P)
-				if err := tx.UpsertEdge(ed); err != nil {
-					return err
-				}
-				rep.Depressed++
+				continue
+			}
+			// Only the link that carried the false activation is to blame: the
+			// last hop of its path. A seed was found on its own evidence, so
+			// no link is weakened for it.
+			path := unusedPath[r]
+			if len(path) < 2 {
+				continue
+			}
+			rate := e.P.LTDIndirectFactor
+			if slices.ContainsFunc(path, func(id string) bool { return usedSet[id] }) {
+				rate = 1
+			}
+			if err := depress(path[len(path)-2], r, unused[r], rate); err != nil {
+				return err
 			}
 		}
 		tick, err := tx.Tick()
@@ -265,7 +287,7 @@ func (e *Engine) Feedback(session string, used []string) (*LearnReport, error) {
 			return err
 		}
 		for _, u := range usedNodes {
-			if err := tx.RecordAccess(u.id, tick, e.P.MaxAccessRecords); err != nil {
+			if err := tx.RecordAccess(u.id, tick, 1, e.P.MaxAccessRecords); err != nil {
 				return err
 			}
 		}

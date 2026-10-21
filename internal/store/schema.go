@@ -168,4 +168,11 @@ INSERT INTO node_projects (node_id, project, created, uses)
 	WHERE s.project <> '' AND sn.role IN ('created', 'used')
 	GROUP BY sn.node_id, s.project;
 `,
+	// node_access.weight: accesses are weighted (a use or creation 1, a
+	// recall hit recall_access_weight); creation now counts as an access,
+	// backfilled for existing neurons.
+	`
+ALTER TABLE node_access ADD COLUMN weight REAL NOT NULL DEFAULT 1;
+INSERT INTO node_access (node_id, tick, weight) SELECT id, created_tick, 1 FROM nodes;
+`,
 }

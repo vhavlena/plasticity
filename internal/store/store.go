@@ -486,10 +486,10 @@ func (t *Tx) Fire(ids []string) error {
 
 // ---------------------------------------------------------------- accesses
 
-// RecordAccess appends an access at the given recall tick and keeps only the
-// newest max accesses.
-func (t *Tx) RecordAccess(id string, tick int64, max int) error {
-	if _, err := t.tx.Exec(`INSERT INTO node_access (node_id, tick) VALUES (?, ?)`, id, tick); err != nil {
+// RecordAccess appends an access of the given weight at the given recall
+// tick and keeps only the newest max accesses.
+func (t *Tx) RecordAccess(id string, tick int64, weight float64, max int) error {
+	if _, err := t.tx.Exec(`INSERT INTO node_access (node_id, tick, weight) VALUES (?, ?, ?)`, id, tick, weight); err != nil {
 		return err
 	}
 	_, err := t.tx.Exec(`DELETE FROM node_access WHERE node_id = ? AND rowid NOT IN (
@@ -497,22 +497,22 @@ func (t *Tx) RecordAccess(id string, tick int64, max int) error {
 	return err
 }
 
-// Accesses returns the access ticks of the given nodes.
-func (t *Tx) Accesses(ids []string) (map[string][]int64, error) {
-	out := map[string][]int64{}
+// Accesses returns the accesses of the given nodes.
+func (t *Tx) Accesses(ids []string) (map[string][]model.Access, error) {
+	out := map[string][]model.Access{}
 	for _, chunk := range chunks(ids, 500) {
-		rows, err := t.tx.Query(`SELECT node_id, tick FROM node_access WHERE node_id IN (`+placeholders(len(chunk))+`)`, anys(chunk)...)
+		rows, err := t.tx.Query(`SELECT node_id, tick, weight FROM node_access WHERE node_id IN (`+placeholders(len(chunk))+`)`, anys(chunk)...)
 		if err != nil {
 			return nil, err
 		}
 		for rows.Next() {
 			var id string
-			var v int64
-			if err := rows.Scan(&id, &v); err != nil {
+			var a model.Access
+			if err := rows.Scan(&id, &a.Tick, &a.Weight); err != nil {
 				rows.Close()
 				return nil, err
 			}
-			out[id] = append(out[id], v)
+			out[id] = append(out[id], a)
 		}
 		if err := rows.Close(); err != nil {
 			return nil, err

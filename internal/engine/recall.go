@@ -317,24 +317,40 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 			}
 		}
 	}
-	// A recorded recall advances the global clock and fires the recalled
-	// neurons, which ages their synapses to neurons that did not fire.
+	// A recorded recall advances the global clock. Only a confident recall
+	// is evidence about its hits: it fires them (which ages their synapses
+	// to neurons that did not fire) and records a light access for each hit
+	// that is not foreign to the recall's project. A low-confidence recall
+	// changes nothing else, so noisy recalls neither age true links nor
+	// feed the ACT-R base level.
+	confident := res.Confidence >= p.LearnMinConfidence
 	err = e.st.Write(func(tx *store.Tx) error {
 		tick, err := tx.AdvanceTick()
 		if err != nil {
 			return err
 		}
 		tr.Tick = tick
+		if !confident {
+			return nil
+		}
 		ids := make([]string, len(res.Hits))
 		for i, h := range res.Hits {
 			ids[i] = h.Node.ID
 		}
+		foreign, err := e.foreignSet(tx, req.Project, ids)
+		if err != nil {
+			return err
+		}
+		ids = slices.DeleteFunc(ids, func(id string) bool { return foreign[id] })
 		if err := tx.Fire(ids); err != nil {
 			return err
 		}
 		for _, h := range res.Hits {
+			if foreign[h.Node.ID] {
+				continue
+			}
 			h.Node.Fires++
-			if err := tx.RecordAccess(h.Node.ID, tick, p.MaxAccessRecords); err != nil {
+			if err := tx.RecordAccess(h.Node.ID, tick, p.RecallAccessWeight, p.MaxAccessRecords); err != nil {
 				return err
 			}
 			if h.Node.Dormant { // recalling a dormant memory reactivates it
@@ -403,14 +419,7 @@ const GlobalTag = "global"
 // (legacy, imported) are never foreign. The project defaults to the
 // session's.
 func (e *Engine) applyProjectAffinity(tx *store.Tx, req *RecallRequest, seeds map[string]float64) error {
-	factor := e.P.ForeignProjectFactor
-	if !req.Auto {
-		factor = e.P.ForeignProjectFactorExplicit
-	}
-	if len(seeds) == 0 || factor >= 1 {
-		return nil
-	}
-	if req.Project == "" && req.Session != "" {
+	if req.Project == "" && req.Session != "" { // also used when recording the recall
 		s, err := tx.GetSession(req.Session)
 		if err != nil {
 			return err
@@ -419,40 +428,62 @@ func (e *Engine) applyProjectAffinity(tx *store.Tx, req *RecallRequest, seeds ma
 			req.Project = s.Project
 		}
 	}
-	if req.Project == "" {
+	factor := e.P.ForeignProjectFactor
+	if !req.Auto {
+		factor = e.P.ForeignProjectFactorExplicit
+	}
+	if len(seeds) == 0 || factor >= 1 || req.Project == "" {
 		return nil
 	}
 	ids := make([]string, 0, len(seeds))
 	for id := range seeds {
 		ids = append(ids, id)
 	}
-	projects, err := tx.NodeProjects(ids)
+	foreign, err := e.foreignSet(tx, req.Project, ids)
 	if err != nil {
 		return err
 	}
+	for id := range foreign {
+		// The scaled seed faces MinSeedStrength again: foreign knowledge
+		// needs 1/factor times the evidence to seed at all.
+		if seeds[id] *= factor; seeds[id] < e.P.MinSeedStrength {
+			delete(seeds, id)
+		}
+	}
+	return nil
+}
+
+// foreignSet returns which of ids are foreign to project (none if project
+// is ""): neurons with project records, none for project, used in fewer
+// than SharedMinProjects projects, and not tagged global.
+func (e *Engine) foreignSet(tx *store.Tx, project string, ids []string) (map[string]bool, error) {
+	foreign := map[string]bool{}
+	if project == "" || len(ids) == 0 {
+		return foreign, nil
+	}
+	projects, err := tx.NodeProjects(ids)
+	if err != nil {
+		return nil, err
+	}
 	var candidates []string
 	for _, id := range ids {
-		if foreignByProjects(projects[id], req.Project, e.P.SharedMinProjects) {
+		if foreignByProjects(projects[id], project, e.P.SharedMinProjects) {
 			candidates = append(candidates, id)
 		}
 	}
 	if len(candidates) == 0 {
-		return nil
+		return foreign, nil
 	}
 	nodes, err := tx.GetNodes(candidates)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, id := range candidates {
 		if n := nodes[id]; n != nil && !slices.Contains(n.Tags, GlobalTag) {
-			// The scaled seed faces MinSeedStrength again: foreign knowledge
-			// needs 1/factor times the evidence to seed at all.
-			if seeds[id] *= factor; seeds[id] < e.P.MinSeedStrength {
-				delete(seeds, id)
-			}
+			foreign[id] = true
 		}
 	}
-	return nil
+	return foreign, nil
 }
 
 // foreignByProjects reports whether a neuron with these project records is

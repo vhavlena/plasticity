@@ -141,6 +141,11 @@ func (e *Engine) insertNodes(nodes []*model.Node, vecs []*nodeVector, then func(
 			if err := tx.InsertNode(n); err != nil {
 				return err
 			}
+			// Creation is an access: a new neuron is not ranked (or made
+			// dormant) as one that was never accessed.
+			if err := tx.RecordAccess(n.ID, tick, 1, e.P.MaxAccessRecords); err != nil {
+				return err
+			}
 			if v := vecs[i]; v != nil {
 				if err := tx.PutVector(n.ID, v.model, v.hash, v.blob); err != nil {
 					return err

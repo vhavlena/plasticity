@@ -153,16 +153,19 @@ func ScaleFactor(total, maxOut float64) float64 {
 	return maxOut / total
 }
 
-// BaseLevel is the ACT-R base-level activation B = ln Σ_j t_j^−d, where t_j is
-// the number of global recall ticks since the j-th access (at least 1). It is
-// −Inf if there are no accesses.
-func BaseLevel(accessTicks []int64, now int64, d float64) float64 {
-	if len(accessTicks) == 0 {
+// BaseLevel is the weighted ACT-R base-level activation B = ln Σ_j w_j·t_j^−d,
+// where t_j is the number of global recall ticks since the j-th access (at
+// least 1) and w_j its weight. It is −Inf if there are no accesses.
+func BaseLevel(accesses []model.Access, now int64, d float64) float64 {
+	if len(accesses) == 0 {
 		return math.Inf(-1)
 	}
 	sum := 0.0
-	for _, t := range accessTicks {
-		sum += math.Pow(float64(max(1, now-t)), -d)
+	for _, a := range accesses {
+		sum += a.Weight * math.Pow(float64(max(1, now-a.Tick)), -d)
+	}
+	if sum <= 0 {
+		return math.Inf(-1)
 	}
 	return math.Log(sum)
 }
