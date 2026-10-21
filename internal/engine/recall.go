@@ -158,11 +158,18 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 		if err != nil {
 			return err
 		}
-		sem, err := e.semanticSearch(tx, qvec, p.SeedLimit)
+		var lexCos map[string]float64 // cosines of the lexical hits, to corroborate them
+		if qvec != nil && p.LexicalCosHigh > 0 {
+			lexCos = make(map[string]float64, len(hits))
+			for _, h := range hits {
+				lexCos[h.Node.ID] = math.NaN() // NaN: the neuron has no vector
+			}
+		}
+		sem, err := e.semanticSearch(tx, qvec, p.SeedLimit, lexCos)
 		if err != nil {
 			return err
 		}
-		sd, err := e.computeSeeds(tx, terms, hits, sem)
+		sd, err := e.computeSeeds(tx, terms, hits, sem, lexCos)
 		if err != nil {
 			return err
 		}

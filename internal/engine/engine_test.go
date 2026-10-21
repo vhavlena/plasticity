@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -652,5 +653,47 @@ func TestRecallMinConfidence(t *testing.T) {
 	}
 	if r, _ := f.e.Recall(q); len(r.Hits) == 0 || r.Suppressed != "" {
 		t.Fatalf("without the threshold the same query recalls: %+v", r)
+	}
+}
+
+// Follow-up filler is not searched; words that carry a topic are.
+func TestFollowUpFillerIsNotSearched(t *testing.T) {
+	for q, want := range map[string]string{
+		"how is it going?":           "",
+		"Go with item 2":             "",
+		"show me the example":        "",
+		"ok, it makes sense":         "",
+		"how is the build going?":    "build",
+		"is the test suite done?":    "test suite",
+		"run the lean build on fit3": "run lean build fit3",
+	} {
+		if got := strings.Join(queryTerms(q), " "); got != want {
+			t.Errorf("%q: terms %q, want %q", q, got, want)
+		}
+	}
+}
+
+// In a graph of at least min_evidence_nodes neurons, a match on generic
+// words alone does not seed, while one specific term in a long prompt does.
+func TestMinimumEvidence(t *testing.T) {
+	f := newFixture(t)
+	for i := 0; i < 50; i++ {
+		f.add(fmt.Sprint("note", i), model.TypeFact, fmt.Sprintf("Project note %d", i), "use the project tooling", "")
+	}
+	f.add("diseq", model.TypeFact, "remove_irrelevant_constr drops decided disequations", "check relevancy of the atom", "")
+	generic := RecallRequest{Query: "which project tooling should we use", NoRecord: true}
+	if r, _ := f.e.Recall(generic); r.Seeds != 0 {
+		t.Fatalf("generic words seeded: %+v", r.Hits)
+	}
+	long := "I wonder whether the project tooling we use is right, since the remove_irrelevant_constr function looks wrong to me"
+	if r, _ := f.e.Recall(RecallRequest{Query: long, NoRecord: true}); !hitIDs(r)[f.ids["diseq"]].IsSeed {
+		t.Fatalf("the specific term must seed: %+v", r.Hits)
+	}
+	// Below min_evidence_nodes the check is off.
+	if err := f.e.SetParam("min_evidence_nodes", "100"); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := f.e.Recall(generic); r.Seeds == 0 {
+		t.Fatalf("without the check the generic match seeds: %+v", r)
 	}
 }

@@ -342,7 +342,7 @@ func (e *Engine) findDuplicate(n *model.Node, vec *nodeVector) (*model.Node, flo
 		if err != nil {
 			return err
 		}
-		best, err := e.semanticSearch(tx, v, 1)
+		best, err := e.semanticSearch(tx, v, 1, nil)
 		if err != nil || len(best) == 0 || best[0].cos < e.P.DedupeCos {
 			return err
 		}

@@ -171,7 +171,10 @@ func (e *Engine) embedQuery(ctx context.Context, query string) []float32 {
 
 // semanticSearch returns the k nodes most similar to q (brute force over
 // all vectors of the current model), best first.
-func (e *Engine) semanticSearch(tx *store.Tx, q []float32, k int) ([]vecHit, error) {
+//
+// The cosine of every neuron that is a key of also is stored there too
+// (also may be nil).
+func (e *Engine) semanticSearch(tx *store.Tx, q []float32, k int, also map[string]float64) ([]vecHit, error) {
 	if q == nil {
 		return nil, nil
 	}
@@ -182,6 +185,9 @@ func (e *Engine) semanticSearch(tx *store.Tx, q []float32, k int) ([]vecHit, err
 			return fmt.Errorf("vector of %s: %w", id, err)
 		}
 		c := embed.Dot(q, v)
+		if _, ok := also[id]; ok {
+			also[id] = c
+		}
 		if h.Len() < k {
 			heap.Push(h, vecHit{id, c})
 		} else if c > (*h)[0].cos {

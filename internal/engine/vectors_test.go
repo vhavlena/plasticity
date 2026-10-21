@@ -248,3 +248,32 @@ func TestEnableOllama(t *testing.T) {
 		t.Fatalf("semantic recall via ollama: %v %+v", err, r)
 	}
 }
+
+// A keyword shared by coincidence seeds only without embeddings: with them,
+// the hit's cosine to the query must corroborate the match.
+func TestLexicalSeedNeedsCorroboration(t *testing.T) {
+	f := newFixture(t, WithEmbedder(conceptEmbedder{}))
+	// "new" occurs in the hooks neuron; the query is about cooking.
+	q := RecallRequest{Query: "new kitchen recipe", NoRecord: true}
+	r, _ := f.e.Recall(q)
+	if _, ok := hitIDs(r)[f.ids["hooks"]]; ok {
+		t.Fatalf("uncorroborated keyword match seeded: %+v", r.Hits)
+	}
+	if h, ok := hitIDs(r)[f.ids["pasta"]]; !ok || !h.IsSeed {
+		t.Fatalf("the semantic match must still seed: %+v", r.Hits)
+	}
+	if r.LexicalConfidence != 0 {
+		t.Fatalf("lexical confidence of a coincidental match: %g", r.LexicalConfidence)
+	}
+	// A corroborated keyword match keeps its full strength.
+	if r, _ := f.e.Recall(RecallRequest{Query: "sqlite storage", NoRecord: true}); r.LexicalConfidence != 1 || !hitIDs(r)[f.ids["sqlite"]].IsSeed {
+		t.Fatalf("corroborated match: %+v", r)
+	}
+	// lexical_cos_high = 0 turns the check off.
+	if err := f.e.SetParam("lexical_cos_high", "0"); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := f.e.Recall(q); !hitIDs(r)[f.ids["hooks"]].IsSeed {
+		t.Fatalf("without the check the keyword match seeds: %+v", r.Hits)
+	}
+}

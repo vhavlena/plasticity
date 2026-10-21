@@ -76,11 +76,29 @@ type Params struct {
 	// the graph when computing query confidence (0 = ignore unknown words,
 	// 1 = treat them as fully unexplained query content).
 	AbsentTermWeight float64 `json:"absent_term_weight"`
+	// MinMatchedIDFShare: a lexical hit seeds only if the rarest term it
+	// matched has IDF ≥ share · idf(N, N/10), i.e. the hit matched a term
+	// about as rare as one occurring in 10% of the neurons. Generic words
+	// ("use", "project") alone no longer seed. 0 turns it off.
+	MinMatchedIDFShare float64 `json:"min_matched_idf_share"`
+	// MinEvidenceNodes: the minimum-evidence check applies only to graphs of
+	// at least this many neurons. In a small graph the words of its dominant
+	// topic ("server", "run") occur in most neurons, so document frequency
+	// would mark the very words that matter as generic.
+	MinEvidenceNodes int `json:"min_evidence_nodes"`
 	// VectorCosLow and VectorCosHigh calibrate embedding similarity into a
 	// semantic seed strength S = clamp((cos − low)/(high − low), 0, 1):
 	// cosine at or below low is no evidence, at or above high is certain.
 	VectorCosLow  float64 `json:"vector_cos_low"`
 	VectorCosHigh float64 `json:"vector_cos_high"`
+	// LexicalCosLow and LexicalCosHigh: with embeddings, a lexical (BM25)
+	// seed counts only as far as the neuron's embedding agrees with the
+	// query: its strength is multiplied by clamp((cos − low)/(high − low)).
+	// A keyword coincidence (a generic word such as "build" or "going" shared
+	// with an unrelated neuron) has a cosine near zero and stops seeding.
+	// lexical_cos_high = 0 turns the check off.
+	LexicalCosLow  float64 `json:"lexical_cos_low"`
+	LexicalCosHigh float64 `json:"lexical_cos_high"`
 	// EmbedMaxWords truncates texts before embedding.
 	EmbedMaxWords int `json:"embed_max_words"`
 	// MinSeedStrength drops seeds whose strength (relative BM25 × query
@@ -164,20 +182,24 @@ func DefaultParams() Params {
 		MaxAccessRecords: 50,
 		DormantBelow:     -4,
 
-		SeedLimit:        10,
-		AbsentTermWeight: 0.5,
-		MinSeedStrength:  0.25,
-		VectorCosLow:     0.25,
-		VectorCosHigh:    0.6,
-		EmbedMaxWords:    200,
-		HopDecay:         0.8,
-		FiringThreshold:  0.1,
-		FanK0:            8,
-		FanBeta:          0.5,
-		MaxNodes:         200,
-		MaxHops:          10,
-		EdgesPerNode:     64,
-		ResultLimit:      10,
+		SeedLimit:          10,
+		AbsentTermWeight:   0.5,
+		MinMatchedIDFShare: 1,
+		MinEvidenceNodes:   50,
+		MinSeedStrength:    0.25,
+		VectorCosLow:       0.25,
+		VectorCosHigh:      0.6,
+		LexicalCosLow:      0.05,
+		LexicalCosHigh:     0.25,
+		EmbedMaxWords:      200,
+		HopDecay:           0.8,
+		FiringThreshold:    0.1,
+		FanK0:              8,
+		FanBeta:            0.5,
+		MaxNodes:           200,
+		MaxHops:            10,
+		EdgesPerNode:       64,
+		ResultLimit:        10,
 
 		ScoreGraph:      0.7,
 		ScoreBaseLevel:  0.2,
@@ -209,6 +231,7 @@ func (p Params) Validate() error {
 		"context_link_weight": p.ContextLinkWeight, "dedupe_cos": p.DedupeCos,
 		"learn_min_confidence": p.LearnMinConfidence, "learn_min_activation": p.LearnMinActivation,
 		"vector_cos_low": p.VectorCosLow, "vector_cos_high": p.VectorCosHigh,
+		"lexical_cos_low": p.LexicalCosLow, "lexical_cos_high": p.LexicalCosHigh,
 	}
 	for k, v := range in01 {
 		if v < 0 || v > 1 {
@@ -220,6 +243,9 @@ func (p Params) Validate() error {
 		"max_stability": p.MaxStability, "max_out_weight": p.MaxOutWeight,
 		"fan_k0": p.FanK0, "actr_decay": p.ActrDecay,
 	}
+	if p.MinMatchedIDFShare < 0 {
+		return fmt.Errorf("min_matched_idf_share must be ≥ 0, got %g", p.MinMatchedIDFShare)
+	}
 	for k, v := range pos {
 		if v <= 0 {
 			return fmt.Errorf("%s must be > 0, got %g", k, v)
@@ -228,12 +254,15 @@ func (p Params) Validate() error {
 	if p.VectorCosLow >= p.VectorCosHigh {
 		return fmt.Errorf("vector_cos_low (%g) must be below vector_cos_high (%g)", p.VectorCosLow, p.VectorCosHigh)
 	}
+	if p.LexicalCosHigh > 0 && p.LexicalCosLow >= p.LexicalCosHigh {
+		return fmt.Errorf("lexical_cos_low (%g) must be below lexical_cos_high (%g)", p.LexicalCosLow, p.LexicalCosHigh)
+	}
 	if p.FiringThreshold == 0 {
 		return fmt.Errorf("firing_threshold must be > 0")
 	}
 	if p.ReinforceTopK < 2 || p.SeedLimit < 1 || p.MaxNodes < 1 || p.MaxHops < 1 ||
 		p.EdgesPerNode < 1 || p.ResultLimit < 1 || p.MaxAccessRecords < 1 || p.TraceRetention < 1 || p.EmbedMaxWords < 1 ||
-		p.ContextLinks < 0 || p.NudgeMinToolCalls < 0 || p.ConsolidateEverySessions < 1 {
+		p.ContextLinks < 0 || p.MinEvidenceNodes < 0 || p.NudgeMinToolCalls < 0 || p.ConsolidateEverySessions < 1 {
 		return fmt.Errorf("integer limits must be positive (reinforce_top_k ≥ 2)")
 	}
 	return nil
