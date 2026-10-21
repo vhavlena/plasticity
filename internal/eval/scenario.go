@@ -33,6 +33,10 @@ type ScenarioNode struct {
 	// Project is the project the neuron was created in; hits from another
 	// project than the query's count as cross-project noise.
 	Project string `json:"project,omitempty"`
+	// UsedIn are the projects the neuron had been used in before the
+	// scenario (for project affinity: a neuron used in several projects is
+	// shared knowledge).
+	UsedIn []string `json:"used_in,omitempty"`
 	// SupersededBy is the key of the neuron that replaces this one; it is
 	// marked as soon as both exist (at load, or when one is added).
 	SupersededBy string `json:"superseded_by,omitempty"`

@@ -953,6 +953,16 @@ func (t *Tx) CountEndedSessions() (int, error) {
 // prompt).
 func (t *Tx) AddSessionNodes(session, role string, ids []string, at time.Time) error {
 	for i, id := range ids {
+		var seen int
+		if err := t.tx.QueryRow(`SELECT count(*) FROM session_nodes WHERE session = ? AND node_id = ? AND role = ?`,
+			session, id, role).Scan(&seen); err != nil {
+			return err
+		}
+		if seen == 0 && (role == "created" || role == "used") {
+			if err := t.notePresenceInSessionProject(session, id, role == "created"); err != nil {
+				return err
+			}
+		}
 		if _, err := t.tx.Exec(`INSERT INTO session_nodes (session, node_id, role, ts, prompt_no)
 			VALUES (?, ?, ?, ?, coalesce((SELECT prompts FROM sessions WHERE id = ?), 0))
 			ON CONFLICT DO UPDATE SET prompt_no = max(prompt_no, excluded.prompt_no)`,
@@ -961,6 +971,68 @@ func (t *Tx) AddSessionNodes(session, role string, ids []string, at time.Time) e
 		}
 	}
 	return nil
+}
+
+// notePresenceInSessionProject records that node was created (or once more
+// used) in the project of session, if the session has one.
+func (t *Tx) notePresenceInSessionProject(session, node string, created bool) error {
+	var project string
+	err := t.tx.QueryRow(`SELECT project FROM sessions WHERE id = ?`, session).Scan(&project)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && project == "" {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	uses := 1
+	if created {
+		uses = 0
+	}
+	return t.AddNodeProject(node, project, created, uses)
+}
+
+// AddNodeProject records that node was created in project (created) and/or
+// used there uses more times.
+func (t *Tx) AddNodeProject(node, project string, created bool, uses int) error {
+	_, err := t.tx.Exec(`INSERT INTO node_projects (node_id, project, created, uses) VALUES (?, ?, ?, ?)
+		ON CONFLICT DO UPDATE SET created = max(created, excluded.created), uses = uses + excluded.uses`,
+		node, project, b2i(created), uses)
+	return err
+}
+
+// NodeProject is one project a neuron belongs to.
+type NodeProject struct {
+	Project string `json:"project"`
+	Created bool   `json:"created"`
+	Uses    int    `json:"uses"`
+}
+
+// NodeProjects returns the projects of the given neurons (neurons without
+// any are absent).
+func (t *Tx) NodeProjects(ids []string) (map[string][]NodeProject, error) {
+	out := map[string][]NodeProject{}
+	for _, chunk := range chunks(ids, 500) {
+		rows, err := t.tx.Query(`SELECT node_id, project, created, uses FROM node_projects WHERE node_id IN (`+
+			placeholders(len(chunk))+`) ORDER BY node_id, project`, anys(chunk)...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id string
+			var p NodeProject
+			var created int
+			if err := rows.Scan(&id, &p.Project, &created, &p.Uses); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			p.Created = created != 0
+			out[id] = append(out[id], p)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 // SessionNodes returns the neurons a session recorded under the given roles,

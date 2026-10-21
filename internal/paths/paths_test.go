@@ -21,8 +21,9 @@ func TestResolution(t *testing.T) {
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got := Project(sub); got != repo {
-		t.Fatalf("project of %s = %s, want %s", sub, got, repo)
+	realRepo, _ := filepath.EvalSymlinks(repo)
+	if got := Project(sub); got != realRepo {
+		t.Fatalf("project of %s = %s, want %s", sub, got, realRepo)
 	}
 	if got := DB(sub); got != filepath.Join(home, "graph.db") {
 		t.Fatalf("global db: %s", got)
@@ -41,5 +42,47 @@ func TestResolution(t *testing.T) {
 	}
 	if ModelsDir() != filepath.Join(home, "models") {
 		t.Fatal("models dir")
+	}
+}
+
+// A git worktree belongs to the project of its main repository, also when
+// reached through a symlink.
+func TestWorktreeResolvesToMainRepository(t *testing.T) {
+	root := t.TempDir()
+	if r, err := filepath.EvalSymlinks(root); err == nil {
+		root = r // macOS: /var -> /private/var
+	}
+	main := filepath.Join(root, "main")
+	wtGit := filepath.Join(main, ".git", "worktrees", "feature")
+	if err := os.MkdirAll(wtGit, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtGit, "commondir"), []byte("../..\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wt := filepath.Join(root, "feature")
+	if err := os.MkdirAll(filepath.Join(wt, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+wtGit+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := Project(filepath.Join(wt, "src")); got != main {
+		t.Fatalf("worktree project = %s, want %s", got, main)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(wt, link); err != nil {
+		t.Fatal(err)
+	}
+	if got := Project(link); got != main {
+		t.Fatalf("symlinked worktree project = %s, want %s", got, main)
+	}
+	// A .git file without commondir (a submodule) is its own project.
+	sub := filepath.Join(root, "sub")
+	os.MkdirAll(filepath.Join(root, "modgit"), 0o755)
+	os.MkdirAll(sub, 0o755)
+	os.WriteFile(filepath.Join(sub, ".git"), []byte("gitdir: ../modgit\n"), 0o644)
+	if got := Project(sub); got != sub {
+		t.Fatalf("submodule project = %s", got)
 	}
 }

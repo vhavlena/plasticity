@@ -81,8 +81,13 @@ type RecallRequest struct {
 	HopDecay  float64
 	Rerank    string // "" or "ppr"
 	NoRecord  bool   // do not record accesses or traces
-	// Project is the project the recall is made in (informational for now).
+	// Project is the project the recall is made in; neurons of other
+	// projects only seed weaker (see ForeignProjectFactor). If empty, the
+	// session's project is used.
 	Project string
+	// Auto marks a recall injected automatically by the prompt hook, as
+	// opposed to one Claude issued itself (explicit).
+	Auto bool
 	// MinConfidence: a recall whose query confidence stays below it returns
 	// no hits and records nothing (no access, firing or trace).
 	MinConfidence float64
@@ -186,6 +191,9 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 		}
 		sd, err := e.computeSeeds(tx, terms, hits, sem, lexCos)
 		if err != nil {
+			return err
+		}
+		if err := e.applyProjectAffinity(tx, &req, sd.seeds); err != nil {
 			return err
 		}
 		seeds := sd.seeds
@@ -381,4 +389,87 @@ func redirectSuperseded(tx *store.Tx, act map[string]*retrieval.Activation, ids 
 	}
 	sort.Strings(ids)
 	return out, ids, nil
+}
+
+// GlobalTag marks a neuron as knowledge shared by all projects (preferences,
+// tool tips, shared infrastructure): it is never foreign.
+const GlobalTag = "global"
+
+// applyProjectAffinity scales the seeds that are foreign to the recall's
+// project by ForeignProjectFactor (ForeignProjectFactorExplicit for recalls
+// Claude issued) and drops those that fall below MinSeedStrength. A neuron is foreign if it has project records, none of
+// them for this project, it is used in fewer than SharedMinProjects
+// projects, and it is not tagged global. Neurons without project records
+// (legacy, imported) are never foreign. The project defaults to the
+// session's.
+func (e *Engine) applyProjectAffinity(tx *store.Tx, req *RecallRequest, seeds map[string]float64) error {
+	factor := e.P.ForeignProjectFactor
+	if !req.Auto {
+		factor = e.P.ForeignProjectFactorExplicit
+	}
+	if len(seeds) == 0 || factor >= 1 {
+		return nil
+	}
+	if req.Project == "" && req.Session != "" {
+		s, err := tx.GetSession(req.Session)
+		if err != nil {
+			return err
+		}
+		if s != nil {
+			req.Project = s.Project
+		}
+	}
+	if req.Project == "" {
+		return nil
+	}
+	ids := make([]string, 0, len(seeds))
+	for id := range seeds {
+		ids = append(ids, id)
+	}
+	projects, err := tx.NodeProjects(ids)
+	if err != nil {
+		return err
+	}
+	var candidates []string
+	for _, id := range ids {
+		if foreignByProjects(projects[id], req.Project, e.P.SharedMinProjects) {
+			candidates = append(candidates, id)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	nodes, err := tx.GetNodes(candidates)
+	if err != nil {
+		return err
+	}
+	for _, id := range candidates {
+		if n := nodes[id]; n != nil && !slices.Contains(n.Tags, GlobalTag) {
+			// The scaled seed faces MinSeedStrength again: foreign knowledge
+			// needs 1/factor times the evidence to seed at all.
+			if seeds[id] *= factor; seeds[id] < e.P.MinSeedStrength {
+				delete(seeds, id)
+			}
+		}
+	}
+	return nil
+}
+
+// foreignByProjects reports whether a neuron with these project records is
+// foreign to project: it has records, none for project, and is used in
+// fewer than sharedMin projects.
+func foreignByProjects(ps []store.NodeProject, project string, sharedMin int) bool {
+	if len(ps) == 0 {
+		return false
+	}
+	used := 0
+	for _, p := range ps {
+		if p.Project == project {
+			return false
+		}
+		if p.Uses > 0 {
+			used++
+		}
+	}
+	return used < sharedMin
 }

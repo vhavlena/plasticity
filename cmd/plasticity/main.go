@@ -454,6 +454,9 @@ connections carry activation further than weak ones. Accesses are recorded
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			req.Query = strings.Join(args, " ")
+			if req.Project != "" {
+				req.Project = paths.Project(req.Project)
+			}
 			if req.Rerank != "" && req.Rerank != "ppr" {
 				return fmt.Errorf("--rerank: only 'ppr' is supported")
 			}
@@ -473,6 +476,7 @@ connections carry activation further than weak ones. Accesses are recorded
 	c.Flags().Float64Var(&req.HopDecay, "hop-decay", 0, "per-hop decay δ (default: hop_decay)")
 	c.Flags().StringVar(&req.Rerank, "rerank", "", "rerank activated subgraph: ppr")
 	c.Flags().BoolVar(&req.NoRecord, "no-record", false, "do not record accesses or traces")
+	c.Flags().StringVar(&req.Project, "project", "", "project directory of the recall (default: the session's); neurons of other projects seed weaker")
 	return c
 }
 

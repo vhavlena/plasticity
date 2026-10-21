@@ -104,6 +104,17 @@ type Params struct {
 	// MinSeedStrength drops seeds whose strength (relative BM25 × query
 	// confidence) is below it; a query without a good match recalls nothing.
 	MinSeedStrength float64 `json:"min_seed_strength"`
+	// ForeignProjectFactor scales the seed strength of a neuron that belongs
+	// to other projects only (created or used there, never in the recall's
+	// project, in fewer than SharedMinProjects projects and not tagged
+	// "global"), so foreign knowledge needs stronger evidence and spreads
+	// less. ForeignProjectFactorExplicit applies to recalls Claude issues
+	// itself (an explicit query is a stronger signal). 1 turns it off.
+	ForeignProjectFactor         float64 `json:"foreign_project_factor"`
+	ForeignProjectFactorExplicit float64 `json:"foreign_project_factor_explicit"`
+	// SharedMinProjects: a neuron used in at least this many projects is
+	// shared knowledge, never foreign.
+	SharedMinProjects int `json:"shared_min_projects"`
 	// SupersededFactor scales the score of a superseded neuron in explicit
 	// recall (the prompt hook leaves superseded neurons out entirely).
 	SupersededFactor float64 `json:"superseded_factor"`
@@ -202,14 +213,18 @@ func DefaultParams() Params {
 		LexicalCosHigh:     0.25,
 		EmbedMaxWords:      200,
 		SupersededFactor:   0.5,
-		HopDecay:           0.8,
-		FiringThreshold:    0.1,
-		FanK0:              8,
-		FanBeta:            0.5,
-		MaxNodes:           200,
-		MaxHops:            10,
-		EdgesPerNode:       64,
-		ResultLimit:        10,
+
+		ForeignProjectFactor:         0.5,
+		ForeignProjectFactorExplicit: 0.8,
+		SharedMinProjects:            2,
+		HopDecay:                     0.8,
+		FiringThreshold:              0.1,
+		FanK0:                        8,
+		FanBeta:                      0.5,
+		MaxNodes:                     200,
+		MaxHops:                      10,
+		EdgesPerNode:                 64,
+		ResultLimit:                  10,
 
 		ScoreGraph:      0.7,
 		ScoreBaseLevel:  0.2,
@@ -243,7 +258,8 @@ func (p Params) Validate() error {
 		"learn_min_confidence": p.LearnMinConfidence, "learn_min_activation": p.LearnMinActivation,
 		"vector_cos_low": p.VectorCosLow, "vector_cos_high": p.VectorCosHigh,
 		"lexical_cos_low": p.LexicalCosLow, "lexical_cos_high": p.LexicalCosHigh,
-		"superseded_factor": p.SupersededFactor,
+		"superseded_factor": p.SupersededFactor, "foreign_project_factor": p.ForeignProjectFactor,
+		"foreign_project_factor_explicit": p.ForeignProjectFactorExplicit,
 	}
 	for k, v := range in01 {
 		if v < 0 || v > 1 {
@@ -274,7 +290,7 @@ func (p Params) Validate() error {
 	}
 	if p.ReinforceTopK < 2 || p.SeedLimit < 1 || p.MaxNodes < 1 || p.MaxHops < 1 ||
 		p.EdgesPerNode < 1 || p.ResultLimit < 1 || p.MaxAccessRecords < 1 || p.TraceRetention < 1 || p.EmbedMaxWords < 1 ||
-		p.ContextLinks < 0 || p.ContextWindow < 0 || p.MinEvidenceNodes < 0 || p.NudgeMinToolCalls < 0 || p.ConsolidateEverySessions < 1 {
+		p.ContextLinks < 0 || p.ContextWindow < 0 || p.SharedMinProjects < 1 || p.MinEvidenceNodes < 0 || p.NudgeMinToolCalls < 0 || p.ConsolidateEverySessions < 1 {
 		return fmt.Errorf("integer limits must be positive (reinforce_top_k ≥ 2)")
 	}
 	return nil

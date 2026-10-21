@@ -459,6 +459,13 @@ func titlePattern(title string) string {
 	return b.String()
 }
 
+// NoteNodeProject records that a neuron was created in project and/or used
+// there uses more times (sessions normally record this themselves; this is
+// for imports and evaluation).
+func (e *Engine) NoteNodeProject(id, project string, created bool, uses int) error {
+	return e.st.Write(func(tx *store.Tx) error { return tx.AddNodeProject(id, project, created, uses) })
+}
+
 // linkToSession links node to the session's most recent used/created
 // neurons, records it under role, and returns the number of links made.
 // With window, only neurons of the last ContextWindow prompts are linked (an

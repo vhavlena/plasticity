@@ -209,7 +209,7 @@ func Run(s *Scenario, cfg Config, dir string) (*Result, error) {
 				// Prompts and notifications are planned like the prompt hook does.
 				req := engine.RecallRequest{Query: q.Q, Session: sid, Project: sess.Project, Limit: cfg.K}
 				if q.Source == SourcePrompt || q.Source == SourceNotification {
-					req.ExcludeSuperseded = true // as the prompt hook
+					req.ExcludeSuperseded, req.Auto = true, true // as the prompt hook
 					plan := hookCfg.PlanRecall(q.Q, func(string) string { return q.OutputTail })
 					qr.Skipped = plan.Skip
 					req.Query, req.MinConfidence = plan.Query, plan.MinConfidence
@@ -312,6 +312,24 @@ func load(e *engine.Engine, s *Scenario) (idOf, keyOf map[string]string, err err
 	idOf, keyOf = make(map[string]string, len(s.Nodes)), make(map[string]string, len(s.Nodes))
 	for i, n := range nodes {
 		idOf[keys[i]], keyOf[n.ID] = n.ID, keys[i]
+	}
+	// Project records, as sessions would have left them: created in the
+	// node's project, used once in each of UsedIn.
+	for _, n := range s.Nodes {
+		id := idOf[n.Key]
+		if id == "" {
+			continue
+		}
+		if n.Project != "" {
+			if err := e.NoteNodeProject(id, n.Project, true, 0); err != nil {
+				return nil, nil, err
+			}
+		}
+		for _, p := range n.UsedIn {
+			if err := e.NoteNodeProject(id, p, false, 1); err != nil {
+				return nil, nil, err
+			}
+		}
 	}
 	links := make([]engine.LinkSpec, len(s.Links))
 	for i, l := range s.Links {

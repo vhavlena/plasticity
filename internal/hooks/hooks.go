@@ -201,7 +201,8 @@ Run every plasticity command as %s ... (it selects this session's memory).
 - Store durable knowledge (decisions with rationale, root causes, working procedures, preferences):
   %s add -t decision|fact|procedure|concept|rationale|question --title "..." -c "..." -r "why" --importance 0..1 --session %s
   (importance: 0.8-1 user preferences/corrections and costly decisions or root causes, 0.4-0.7 useful facts and procedures, 0.1-0.3 minor details;
-  add --supersedes OLD_ID when the new neuron replaces an outdated one)
+  add --supersedes OLD_ID when the new neuron replaces an outdated one;
+  --tags global for knowledge shared across projects: preferences, tool tips, shared infrastructure)
 - Report memories you actually used (also ones you found via plasticity search/recall):
   %s used --session %s ID [ID...]
 Use the plasticity:memory skill for guidance.`, st.Nodes, cfg.Scope, search, id, cli, cli, id, cli, id, cli, id)
@@ -257,7 +258,7 @@ func Prompt(e *engine.Engine, in Input, project string, cfg Config) (*Output, er
 	// through explicit recall and search. Superseded neurons are never
 	// injected; their successors are, in their place.
 	r, err := e.Recall(engine.RecallRequest{Query: plan.Query, Session: in.SessionID, Project: project, Limit: limit,
-		MinConfidence: plan.MinConfidence, ExcludeTypes: []model.NodeType{model.TypeEpisode}, ExcludeSuperseded: true})
+		MinConfidence: plan.MinConfidence, ExcludeTypes: []model.NodeType{model.TypeEpisode}, ExcludeSuperseded: true, Auto: true})
 	if err != nil {
 		return nil, err
 	}

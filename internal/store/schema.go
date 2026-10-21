@@ -151,4 +151,21 @@ CREATE INDEX events_kind ON events(kind, id);
 	`ALTER TABLE session_nodes ADD COLUMN prompt_no INTEGER NOT NULL DEFAULT 0;`,
 	// superseded_by: the neuron that replaces this one ('' if current).
 	`ALTER TABLE nodes ADD COLUMN superseded_by TEXT NOT NULL DEFAULT '';`,
+	// node_projects: the projects a neuron was created in or used in (uses =
+	// sessions that reported it used), for project affinity. Backfilled from
+	// the session history.
+	`
+CREATE TABLE node_projects (
+	node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+	project TEXT NOT NULL,
+	created INTEGER NOT NULL DEFAULT 0,
+	uses    INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (node_id, project)
+);
+INSERT INTO node_projects (node_id, project, created, uses)
+	SELECT sn.node_id, s.project, max(sn.role = 'created'), sum(sn.role = 'used')
+	FROM session_nodes sn JOIN sessions s ON s.id = sn.session JOIN nodes n ON n.id = sn.node_id
+	WHERE s.project <> '' AND sn.role IN ('created', 'used')
+	GROUP BY sn.node_id, s.project;
+`,
 }

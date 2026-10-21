@@ -53,6 +53,9 @@ plasticity add -t decision --title "Use SQLite WAL for storage" \
 - **One idea per neuron.** Several ideas → several `add` calls; link them with
   `--link ID:kind` (`supports`, `derives_from`, `contradicts`, `part_of`, `explicit`).
 - `--session` links the neuron to what this session already used or created.
+- **Cross-project knowledge**: memories from other projects are recalled less
+  readily. Tag knowledge that holds everywhere (your preferences, tool tips,
+  shared infrastructure such as servers) with `--tags global`.
 
 **If the result has `duplicate_of`**, nothing was inserted: an equivalent neuron
 exists. Refine it instead (`plasticity update ID -c "..." -r "..."`), or link to it.
