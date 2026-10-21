@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/vhavlena/plasticity/internal/embed"
 	"github.com/vhavlena/plasticity/internal/model"
 	"github.com/vhavlena/plasticity/internal/plasticity"
 	"github.com/vhavlena/plasticity/internal/store"
@@ -22,6 +23,9 @@ type LearnReport struct {
 	// node's activation was caused by the other or by the same seed.
 	Dependent int `json:"skipped_dependent"`
 	Scaled    int `json:"scaled_nodes"`
+	// WindowPairs counts the pairs (included in Pairs) strengthened between
+	// reported neurons and those reported earlier in the same task window.
+	WindowPairs int `json:"window_pairs"`
 }
 
 // activated is a node with its activation in a co-activation event. path is
@@ -57,37 +61,118 @@ func (e *Engine) coactivate(tx *store.Tx, nodes []activated, now time.Time, rep 
 	}
 	for i := 0; i < len(nodes); i++ {
 		for j := i + 1; j < len(nodes); j++ {
-			a, b := nodes[i], nodes[j]
-			if a.id == b.id {
-				continue
-			}
-			if !independent(a, b) {
-				rep.Dependent++
-				continue
-			}
-			ed, err := tx.GetEdge(a.id, b.id, model.KindAssociative)
-			if err != nil {
+			if err := e.potentiatePair(tx, nodes[i], nodes[j], fires, now, rep, touched); err != nil {
 				return err
 			}
-			if ed == nil {
-				fa, fb := fires[a.id], fires[b.id]
-				if fa == nil || fb == nil {
-					continue // node deleted since the trace was recorded
-				}
-				ed = plasticity.NewAssociative(a.id, b.id, fa.Fires, fb.Fires, now, e.P)
-				rep.Created++
-			} else {
-				rep.Potentiated++
-			}
-			plasticity.Potentiate(ed, a.a, b.a, now, e.P)
-			if err := tx.UpsertEdge(ed); err != nil {
-				return err
-			}
-			rep.Pairs++
-			touched[a.id], touched[b.id] = true, true
 		}
 	}
 	return nil
+}
+
+// potentiatePair applies Hebbian LTP to the associative synapse of a and b
+// (creating it if needed) unless their co-activation is not independent.
+// fires holds both nodes (for the marks of a new synapse).
+func (e *Engine) potentiatePair(tx *store.Tx, a, b activated, fires map[string]*model.Node, now time.Time, rep *LearnReport, touched map[string]bool) error {
+	if a.id == b.id {
+		return nil
+	}
+	if !independent(a, b) {
+		rep.Dependent++
+		return nil
+	}
+	ed, err := tx.GetEdge(a.id, b.id, model.KindAssociative)
+	if err != nil {
+		return err
+	}
+	if ed == nil {
+		fa, fb := fires[a.id], fires[b.id]
+		if fa == nil || fb == nil {
+			return nil // node deleted since the trace was recorded
+		}
+		ed = plasticity.NewAssociative(a.id, b.id, fa.Fires, fb.Fires, now, e.P)
+		rep.Created++
+	} else {
+		rep.Potentiated++
+	}
+	plasticity.Potentiate(ed, a.a, b.a, now, e.P)
+	if err := tx.UpsertEdge(ed); err != nil {
+		return err
+	}
+	rep.Pairs++
+	touched[a.id], touched[b.id] = true, true
+	return nil
+}
+
+// coUseInWindow strengthens each reported neuron with the neurons the
+// session reported used within its last ContextWindow prompts, at
+// WindowLTPFactor of the full rate. With embeddings, a pair is linked only if
+// their cosine is at least WindowLTPMinCos: a topic switch inside the window
+// (issue triage, then a regression) puts unrelated neurons side by side. Single-neuron reports of one task thus
+// still connect (and confirm tentative context links between them) without
+// asking the agent to batch reports across topics.
+func (e *Engine) coUseInWindow(tx *store.Tx, session string, used []activated, usedSet map[string]bool, now time.Time, rep *LearnReport, touched map[string]bool) error {
+	if e.P.WindowLTPFactor <= 0 || e.P.ContextWindow <= 0 {
+		return nil
+	}
+	s, err := tx.GetSession(session)
+	if err != nil || s == nil {
+		return err
+	}
+	recent, err := tx.SessionNodesSince(session, s.Prompts-e.P.ContextWindow, RoleUsed)
+	if err != nil {
+		return err
+	}
+	recent = slices.DeleteFunc(recent, func(id string) bool { return usedSet[id] })
+	if len(recent) == 0 {
+		return nil
+	}
+	ids := append(slices.Clone(recent), sortedKeys(usedSet)...)
+	fires, err := tx.GetNodes(ids)
+	if err != nil {
+		return err
+	}
+	related, err := e.relatedByEmbedding(tx, ids)
+	if err != nil {
+		return err
+	}
+	before := rep.Pairs
+	for _, u := range used {
+		for _, r := range recent {
+			if !related(u.id, r) {
+				continue
+			}
+			if err := e.potentiatePair(tx, u, activated{id: r, a: e.P.WindowLTPFactor}, fires, now, rep, touched); err != nil {
+				return err
+			}
+		}
+	}
+	rep.WindowPairs = rep.Pairs - before
+	return nil
+}
+
+// relatedByEmbedding returns a test whether two of ids are semantically
+// related enough to be linked by co-use: cosine ≥ WindowLTPMinCos. Without
+// embeddings (or a vector), or with WindowLTPMinCos = 0, every pair is.
+func (e *Engine) relatedByEmbedding(tx *store.Tx, ids []string) (func(a, b string) bool, error) {
+	all := func(string, string) bool { return true }
+	model := e.activeModel()
+	if e.P.WindowLTPMinCos <= 0 || model == "" {
+		return all, nil
+	}
+	blobs, err := tx.Vectors(model, ids)
+	if err != nil {
+		return nil, err
+	}
+	vecs := make(map[string][]float32, len(blobs))
+	for id, b := range blobs {
+		if vecs[id], err = embed.Decode(b); err != nil {
+			return nil, fmt.Errorf("vector of %s: %w", id, err)
+		}
+	}
+	return func(a, b string) bool {
+		va, vb := vecs[a], vecs[b]
+		return va == nil || vb == nil || embed.Dot(va, vb) >= e.P.WindowLTPMinCos
+	}, nil
 }
 
 // homeostasis rescales the associative synapses of each touched node whose
@@ -175,6 +260,12 @@ func (e *Engine) Reinforce(ids []string) (*LearnReport, error) {
 // ReinforceSession learns from (and deletes) the session's pending recall traces: the nodes
 // independently co-activated in each recall are associated with LTP
 // proportional to the product of their activations.
+//
+// It is not called in production (only by 'reinforce --session' and the
+// eval's reinforce mode): co-recalled is not co-used, and on the real-use
+// scenarios 84% of the links it creates are spurious. Production learning
+// comes from 'used' reports (Feedback), including co-use within a task
+// window.
 func (e *Engine) ReinforceSession(session string) (*LearnReport, error) {
 	rep := &LearnReport{}
 	now := timestamp()
@@ -202,7 +293,9 @@ func (e *Engine) ReinforceSession(session string) (*LearnReport, error) {
 }
 
 // Feedback tells the graph which nodes were actually useful in the session.
-// Used nodes are potentiated with each other (activation 1). For each node
+// Used nodes are potentiated with each other (activation 1) and, at
+// WindowLTPFactor, with the nodes the session reported used within its last
+// ContextWindow prompts (see coUseInWindow). For each node
 // recalled in the session's pending traces but not used, LTD weakens the
 // associative link that activated it: the last hop of its activation path,
 // at full rate if the path runs through a used node and at
@@ -247,6 +340,9 @@ func (e *Engine) Feedback(session string, used []string) (*LearnReport, error) {
 
 		touched := map[string]bool{}
 		if err := e.coactivate(tx, usedNodes, now, rep, touched); err != nil {
+			return err
+		}
+		if err := e.coUseInWindow(tx, session, usedNodes, usedSet, now, rep, touched); err != nil {
 			return err
 		}
 		depress := func(a, b string, ai, aj float64) error {

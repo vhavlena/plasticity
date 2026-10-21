@@ -739,6 +739,32 @@ func (t *Tx) VectorHash(id, model string) (string, error) {
 	return h, err
 }
 
+// Vectors returns the stored vectors of the given nodes under model (nodes
+// without one are absent).
+func (t *Tx) Vectors(model string, ids []string) (map[string][]byte, error) {
+	out := map[string][]byte{}
+	for _, chunk := range chunks(ids, 500) {
+		rows, err := t.tx.Query(`SELECT node_id, vec FROM node_vectors WHERE model = ? AND node_id IN (`+placeholders(len(chunk))+`)`,
+			append([]any{model}, anys(chunk)...)...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id string
+			var vec []byte
+			if err := rows.Scan(&id, &vec); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[id] = vec
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 // ScanVectors calls fn for every stored vector of the given model.
 func (t *Tx) ScanVectors(model string, fn func(id string, vec []byte) error) error {
 	rows, err := t.tx.Query(`SELECT node_id, vec FROM node_vectors WHERE model = ?`, model)

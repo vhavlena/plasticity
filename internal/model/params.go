@@ -170,6 +170,13 @@ type Params struct {
 	ContextLinkWeight float64 `json:"context_link_weight"`
 	// ContextLinks caps how many recent session neurons a new one links to.
 	ContextLinks int `json:"context_links"`
+	// WindowLTPFactor scales the LTP rate between a neuron reported used and
+	// the neurons the session reported used within its last ContextWindow
+	// prompts (0 turns this off).
+	WindowLTPFactor float64 `json:"window_ltp_factor"`
+	// WindowLTPMinCos: with embeddings, co-use within the window links two
+	// neurons only if their embedding cosine is at least this (0 = always).
+	WindowLTPMinCos float64 `json:"window_ltp_min_cos"`
 	// ContextWindow: a new neuron links only to session neurons used or
 	// created within the last ContextWindow user prompts (notifications do
 	// not count), i.e. to the same task. 0 = the whole session.
@@ -254,6 +261,8 @@ func DefaultParams() Params {
 		ContextLinkWeight:        0.1,
 		ContextLinks:             10,
 		ContextWindow:            3,
+		WindowLTPFactor:          0.5,
+		WindowLTPMinCos:          0.4,
 		DedupeCos:                0.9,
 		NudgeMinToolCalls:        5,
 		ConsolidateEverySessions: 10,

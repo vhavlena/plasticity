@@ -277,3 +277,21 @@ func TestLexicalSeedNeedsCorroboration(t *testing.T) {
 		t.Fatalf("without the check the keyword match seeds: %+v", r.Hits)
 	}
 }
+
+// With embeddings, co-use within the task window links only semantically
+// related neurons: a topic switch inside the window links nothing.
+func TestCoUseWindowNeedsRelatedEmbeddings(t *testing.T) {
+	f := newFixture(t, WithEmbedder(conceptEmbedder{}))
+	f.e.StartSession("S", "/repo", "startup")
+	f.e.NotePrompt("S", "/repo", "storage")
+	if _, err := f.e.Used("S", []string{f.ids["sqlite"]}); err != nil {
+		t.Fatal(err)
+	}
+	f.e.NotePrompt("S", "/repo", "dinner")
+	if rep, err := f.e.Used("S", []string{f.ids["pasta"]}); err != nil || rep.WindowPairs != 0 || f.weight("sqlite", "pasta") != 0 {
+		t.Fatalf("unrelated neurons linked by co-use: %v %+v", err, rep)
+	}
+	if rep, err := f.e.Used("S", []string{f.ids["badger"]}); err != nil || rep.WindowPairs != 1 || f.weight("sqlite", "badger") == 0 {
+		t.Fatalf("related neurons should be linked: %v %+v", err, rep)
+	}
+}

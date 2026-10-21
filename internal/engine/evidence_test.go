@@ -115,3 +115,51 @@ func TestOnlyConfidentRecallsFireAndAccess(t *testing.T) {
 		t.Fatalf("confident recall: fires %d, accesses %v", fires, acc)
 	}
 }
+
+// Two single-neuron used reports within context_window prompts are linked
+// (at window_ltp_factor of the full rate); reports further apart are not.
+func TestCoUseWithinTaskWindow(t *testing.T) {
+	f := newFixture(t)
+	f.e.StartSession("S", "/repo", "startup")
+	prompt := func(n int) {
+		for i := 0; i < n; i++ {
+			if err := f.e.NotePrompt("S", "/repo", "next"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	used := func(name string) *LearnReport {
+		t.Helper()
+		rep, err := f.e.Used("S", []string{f.ids[name]})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rep
+	}
+	prompt(1)
+	used("sqlite")
+	prompt(1)
+	if rep := used("badger"); rep.WindowPairs != 1 || f.weight("sqlite", "badger") == 0 {
+		t.Fatalf("reports one prompt apart should be linked: %+v", rep)
+	}
+	full := 0.0
+	{ // the same pair reported together, at the full rate
+		g := newFixture(t)
+		g.e.StartSession("S", "/repo", "startup")
+		g.e.Used("S", []string{g.ids["sqlite"], g.ids["badger"]})
+		full = g.weight("sqlite", "badger")
+	}
+	if w := f.weight("sqlite", "badger"); !(w < full) {
+		t.Fatalf("window link %g should be weaker than a joint report's %g", w, full)
+	}
+	prompt(4) // sqlite and badger are now outside the window
+	if rep := used("hebb"); rep.WindowPairs != 0 || f.weight("hebb", "sqlite") != 0 || f.weight("hebb", "badger") != 0 {
+		t.Fatalf("reports outside the window were linked: %+v", rep)
+	}
+	if err := f.e.SetParam("window_ltp_factor", "0"); err != nil {
+		t.Fatal(err)
+	}
+	if rep := used("spread"); rep.WindowPairs != 0 || f.weight("spread", "hebb") != 0 {
+		t.Fatalf("window_ltp_factor 0 should turn it off: %+v", rep)
+	}
+}

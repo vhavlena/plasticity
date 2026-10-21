@@ -111,10 +111,14 @@ If one is wrong or outdated, fix it with `plasticity update ID ...`, mark it
 ## 3. Report what helped
 
 When memories helped — injected ones or ones you found yourself — report them
-together; this is what teaches the graph which knowledge belongs together:
+right after they helped, once per task; this is what teaches the graph which
+knowledge belongs together:
 
 ```sh
 plasticity used --session <SESSION_ID> <ID> [<ID> ...]
 ```
 
 Report only memories that actually influenced your work, not everything shown.
+Do not save reports up for the end of a session: memories reported within a
+few prompts of each other are linked as parts of the same task, while one
+batch for a whole session would link unrelated topics.
