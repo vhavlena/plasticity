@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"slices"
 	"sort"
@@ -74,6 +75,11 @@ type RecallRequest struct {
 	HopDecay  float64
 	Rerank    string // "" or "ppr"
 	NoRecord  bool   // do not record accesses or traces
+	// Project is the project the recall is made in (informational for now).
+	Project string
+	// MinConfidence: a recall whose query confidence stays below it returns
+	// no hits and records nothing (no access, firing or trace).
+	MinConfidence float64
 	// ExcludeTypes leaves neurons of these types out of the hits; they
 	// still carry activation to their neighbors.
 	ExcludeTypes []model.NodeType
@@ -100,7 +106,9 @@ type RecallResult struct {
 	RecallID string `json:"recall_id,omitempty"`
 	// TraceSkipped explains why no trace was stored despite a session.
 	TraceSkipped string `json:"trace_skipped,omitempty"`
-	Query        string `json:"query"`
+	// Suppressed explains why a recall with seeds returned no hits.
+	Suppressed string `json:"suppressed,omitempty"`
+	Query      string `json:"query"`
 	// Confidence is max(LexicalConfidence, SemanticConfidence); it gates
 	// learning.
 	Confidence float64 `json:"confidence"`
@@ -162,6 +170,10 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 		res.Confidence, res.Terms, res.Seeds = sd.confidence(), sd.terms, len(seeds)
 		res.LexicalConfidence, res.SemanticConfidence = sd.lexical, sd.semantic
 		if len(seeds) == 0 {
+			return nil
+		}
+		if res.Confidence < req.MinConfidence {
+			res.Suppressed = fmt.Sprintf("query confidence %.2f below %.2f", res.Confidence, req.MinConfidence)
 			return nil
 		}
 

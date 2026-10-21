@@ -60,7 +60,8 @@ were retrieved (only links, learning or embeddings can find those).
 Noise: hits outside the labels, hits from another project than the session's,
 unlabeled queries (nothing should be recalled) that recalled anything, and
 queries recalling nodes labeled stale (superseded). Queries with source
-"prompt" or "notification" pass the prompt hook's filter first.`,
+"prompt" or "notification" are planned like the prompt hook does, with the
+hook options from the environment (e.g. PLASTICITY_NOTIFICATIONS=all).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, err := eval.Load(args[0])
@@ -113,7 +114,10 @@ queries recalling nodes labeled stale (superseded). Queries with source
 				}
 			}
 			if jsonOut != "" {
-				raw, _ := json.MarshalIndent(rep, "", "  ")
+				raw, err := json.MarshalIndent(rep, "", "  ")
+				if err != nil {
+					return err
+				}
 				if err := os.WriteFile(jsonOut, append(raw, '\n'), 0o644); err != nil {
 					return err
 				}

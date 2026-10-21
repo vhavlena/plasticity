@@ -62,6 +62,17 @@
         "off"
       ]
     },
+    "notifications": {
+      "type": "string",
+      "title": "Task notifications",
+      "description": "Recall for task notifications (finished background commands and agents) delivered as prompts: failed: only for failed tasks, on their error output; all: like any prompt; off: never",
+      "default": "failed",
+      "options": [
+        "failed",
+        "all",
+        "off"
+      ]
+    },
     "log": {
       "type": "boolean",
       "title": "Event log",

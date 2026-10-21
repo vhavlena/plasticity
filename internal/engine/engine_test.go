@@ -635,3 +635,22 @@ func TestLearnedLinkDoesNotSelfReinforce(t *testing.T) {
 		t.Fatalf("synapse reinforced itself: %g → %g", w, got)
 	}
 }
+
+// A recall below MinConfidence returns nothing and records nothing.
+func TestRecallMinConfidence(t *testing.T) {
+	f := newFixture(t, WithoutEmbeddings())
+	q := RecallRequest{Query: "sqlite storage lock cooking kubernetes helm", Session: "S", Limit: 5}
+	weak := q
+	weak.MinConfidence = 0.99
+	r, err := f.e.Recall(weak)
+	if err != nil || len(r.Hits) != 0 || r.Suppressed == "" || r.RecallID != "" || r.Confidence >= 0.99 || r.Seeds == 0 {
+		t.Fatalf("suppressed recall: %v %+v", err, r)
+	}
+	n, _ := f.e.node(f.ids["sqlite"])
+	if st, _ := f.e.Stats(); n.Fires != 0 || st.PendingTraces != 0 {
+		t.Fatalf("a suppressed recall must not fire neurons or store traces: fires %d, %+v", n.Fires, st)
+	}
+	if r, _ := f.e.Recall(q); len(r.Hits) == 0 || r.Suppressed != "" {
+		t.Fatalf("without the threshold the same query recalls: %+v", r)
+	}
+}

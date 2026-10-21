@@ -62,6 +62,16 @@ type Config struct {
 	// ContextBudget caps the injected characters per prompt (Claude Code
 	// truncates additional context above 10,000 characters).
 	ContextBudget int
+	// Notifications selects which task notifications are recalled (see
+	// PlanRecall): NotifyFailed, NotifyAll (as plain prompts) or NotifyOff.
+	Notifications string
+	// Task notifications (see PlanRecall): only failed tasks are recalled,
+	// with at most NotificationLimit hits (0: RecallLimit), only when the query confidence
+	// reaches NotificationMinConfidence, on at most NotificationMaxChars
+	// characters of description and error output.
+	NotificationLimit         int
+	NotificationMinConfidence float64
+	NotificationMaxChars      int
 	// DB is the graph the hook opened. Commands Claude runs through Bash see
 	// neither the plugin options nor the session's cwd, so the commands the
 	// hooks suggest name this graph (and the log option) explicitly (see CLI).
@@ -87,10 +97,16 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// DefaultConfig returns the plugin options' defaults.
+func DefaultConfig() Config {
+	return Config{Scope: "global", RecallLimit: 6, Reflect: true, Log: true, Embeddings: "auto", ContextBudget: 3000,
+		SessionIdle: 48 * time.Hour, Notifications: NotifyFailed, NotificationLimit: 0, NotificationMinConfidence: 0.6, NotificationMaxChars: 600}
+}
+
 // ConfigFromEnv reads CLAUDE_PLUGIN_OPTION_<KEY> (as declared or upper-case),
 // with PLASTICITY_<KEY> overrides for use outside the plugin.
 func ConfigFromEnv() Config {
-	c := Config{Scope: "global", RecallLimit: 6, Reflect: true, Log: true, Embeddings: "auto", ContextBudget: 3000, SessionIdle: 48 * time.Hour}
+	c := DefaultConfig()
 	get := func(key string) (string, bool) {
 		for _, k := range []string{"PLASTICITY_" + strings.ToUpper(key), "CLAUDE_PLUGIN_OPTION_" + strings.ToUpper(key), "CLAUDE_PLUGIN_OPTION_" + key} {
 			if v, ok := os.LookupEnv(k); ok && strings.TrimSpace(v) != "" {
@@ -123,6 +139,27 @@ func ConfigFromEnv() Config {
 	}
 	if v, ok := get("embeddings"); ok {
 		c.Embeddings = strings.ToLower(v)
+	}
+	if v, ok := get("notifications"); ok {
+		switch v = strings.ToLower(v); v {
+		case NotifyFailed, NotifyAll, NotifyOff:
+			c.Notifications = v
+		}
+	}
+	if v, ok := get("notification_limit"); ok {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.NotificationLimit = n
+		}
+	}
+	if v, ok := get("notification_min_confidence"); ok {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 && f <= 1 {
+			c.NotificationMinConfidence = f
+		}
+	}
+	if v, ok := get("notification_max_chars"); ok {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.NotificationMaxChars = n
+		}
 	}
 	return c
 }
@@ -193,34 +230,38 @@ func CloseAbandoned(e *engine.Engine, cfg Config, limit int) (int, error) {
 	return closed, nil
 }
 
-// SkipsRecall reports prompts that need no recall: slash commands and very
-// short inputs (acknowledgements). The eval runner applies it to simulated
-// prompts, so scenarios see the same filter as the prompt hook.
-func SkipsRecall(prompt string) bool {
-	p := strings.TrimSpace(prompt)
-	return strings.HasPrefix(p, "/") || len(strings.Fields(p)) < 3
-}
-
-// Prompt recalls memories for the user's prompt and injects them.
+// Prompt recalls memories for the user's prompt and injects them (see
+// PlanRecall for which prompts are recalled and how).
 func Prompt(e *engine.Engine, in Input, project string, cfg Config) (*Output, error) {
-	if err := e.NotePrompt(in.SessionID, project, in.Prompt); err != nil {
+	plan := cfg.PlanRecall(in.Prompt, ReadOutputTail)
+	source := engine.RecallSourcePrompt
+	if plan.Kind == KindNotification {
+		source = engine.RecallSourceNotification
+		if err := e.NoteNotification(in.SessionID, project, in.Prompt); err != nil {
+			return nil, err
+		}
+	} else if err := e.NotePrompt(in.SessionID, project, in.Prompt); err != nil {
 		return nil, err
 	}
-	if SkipsRecall(in.Prompt) {
+	if plan.Skip {
 		return nil, nil
+	}
+	limit := cfg.RecallLimit
+	if plan.Limit > 0 {
+		limit = min(limit, plan.Limit)
 	}
 	start := time.Now()
 	// Episodes quote raw prompts: they match many queries lexically and would
 	// crowd knowledge out of the few injected slots. They stay reachable
 	// through explicit recall and search.
-	r, err := e.Recall(engine.RecallRequest{Query: in.Prompt, Session: in.SessionID, Limit: cfg.RecallLimit,
-		ExcludeTypes: []model.NodeType{model.TypeEpisode}})
+	r, err := e.Recall(engine.RecallRequest{Query: plan.Query, Session: in.SessionID, Project: project, Limit: limit,
+		MinConfidence: plan.MinConfidence, ExcludeTypes: []model.NodeType{model.TypeEpisode}})
 	if err != nil {
 		return nil, err
 	}
 	latency := time.Since(start)
 	text := FormatMemories(r, in.SessionID, cfg.CLI(), cfg.ContextBudget)
-	e.LogRecall(in.SessionID, engine.RecallSourcePrompt, in.Prompt, r, latency, len(text))
+	e.LogRecall(in.SessionID, source, plan.Query, r, latency, len(text))
 	if text == "" {
 		return nil, nil
 	}

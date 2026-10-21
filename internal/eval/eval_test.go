@@ -2,6 +2,7 @@ package eval
 
 import (
 	"bytes"
+	"encoding/json"
 	"math"
 	"path/filepath"
 	"reflect"
@@ -183,6 +184,9 @@ func TestNoiseStaleAndSessionMode(t *testing.T) {
 	}
 	if q[0].Metrics.CrossProject == 0 || q[0].Metrics.Irrelevant < q[0].Metrics.CrossProject {
 		t.Fatalf("the policy server procedure should count as cross-project noise: %+v", q[0])
+	}
+	if _, err := json.Marshal(r); err != nil {
+		t.Fatalf("unlabeled queries must not break the JSON report: %v", err)
 	}
 	if q[3].Metrics.StaleLabels != 1 || q[3].Metrics.StaleHits != 1 {
 		t.Fatalf("stale: %+v", q[3])

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vhavlena/plasticity/internal/engine"
+	"github.com/vhavlena/plasticity/internal/hooks"
 	"github.com/vhavlena/plasticity/internal/store"
 )
 
@@ -41,13 +42,17 @@ type (
 	}
 )
 
-// source returns the recall's source (events before sources existed were
-// all prompt recalls).
+// source returns the recall's source. Events before sources existed were
+// all prompt recalls, and before notifications were told apart, task
+// notifications were recalled as prompts.
 func (p recallPayload) source() string {
-	if p.Source == "" {
-		return engine.RecallSourcePrompt
+	switch {
+	case p.Source != "" && p.Source != engine.RecallSourcePrompt:
+		return p.Source
+	case hooks.IsNotification(p.query()):
+		return engine.RecallSourceNotification
 	}
-	return p.Source
+	return engine.RecallSourcePrompt
 }
 
 func (p recallPayload) query() string {
@@ -69,6 +74,9 @@ type Usage struct {
 	To       time.Time `json:"to,omitzero"`
 	Sessions int       `json:"sessions"` // sessions with at least one prompt
 	Prompts  int       `json:"prompts"`
+	// Notifications are task notifications delivered as prompts (not
+	// counted in Prompts).
+	Notifications int `json:"notifications"`
 
 	// Recall (UserPromptSubmit). Trivial prompts are not recalled.
 	Recalls       int            `json:"recalls"`
@@ -224,7 +232,13 @@ func AnalyzeUsage(events []store.Event) *Usage {
 		u.To = ev.At
 		d := day(ev.At)
 		switch ev.Kind {
+		case engine.EventNotification:
+			u.Notifications++
 		case engine.EventPrompt:
+			if p, ok := decode[struct{ Prompt string }](ev); ok && hooks.IsNotification(p.Prompt) {
+				u.Notifications++ // logged as a prompt before notifications were told apart
+				continue
+			}
 			u.Prompts++
 			sessions[ev.Session] = true
 			if daySessions[d.Day] == nil {
@@ -420,14 +434,14 @@ func (u *Usage) WriteText(w io.Writer) error {
 		_, err := fmt.Fprintln(w, "no logged activity in the selected range")
 		return err
 	}
-	fmt.Fprintf(w, "activity %s .. %s: %d sessions, %d prompts\n\n",
-		u.From.Local().Format("2006-01-02 15:04"), u.To.Local().Format("2006-01-02 15:04"), u.Sessions, u.Prompts)
+	fmt.Fprintf(w, "activity %s .. %s: %d sessions, %d prompts, %d task notifications\n\n",
+		u.From.Local().Format("2006-01-02 15:04"), u.To.Local().Format("2006-01-02 15:04"), u.Sessions, u.Prompts, u.Notifications)
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	row := func(k, f string, a ...any) { fmt.Fprintf(tw, "  %s\t"+f+"\n", append([]any{k}, a...)...) }
 	fmt.Fprintln(tw, "recall")
 	row("recalls", "%d", u.Recalls)
-	for _, src := range []string{engine.RecallSourcePrompt, engine.RecallSourceClaude} {
+	for _, src := range []string{engine.RecallSourcePrompt, engine.RecallSourceNotification, engine.RecallSourceClaude} {
 		su := u.BySource[src]
 		if su == nil {
 			su = &SourceUsage{}
@@ -435,6 +449,8 @@ func (u *Usage) WriteText(w io.Writer) error {
 		switch src {
 		case engine.RecallSourcePrompt:
 			row("  per prompt", "%d (%s of prompts; trivial prompts are skipped), %d empty", su.Recalls, ratio(su.Recalls, u.Prompts), su.Empty)
+		case engine.RecallSourceNotification:
+			row("  per notification", "%d (%s of task notifications), %d empty", su.Recalls, ratio(su.Recalls, u.Notifications), su.Empty)
 		case engine.RecallSourceClaude:
 			row("  by Claude", "%d (%.1f per session), %d empty", su.Recalls, perSession(su.Recalls, u.Sessions), su.Empty)
 		}
@@ -446,7 +462,7 @@ func (u *Usage) WriteText(w io.Writer) error {
 	row("useful recalls", "%s of non-empty recalls had a hit reported used", pct(u.RecallsUseful))
 	fmt.Fprintln(tw, "use")
 	row("usage rate", "%s (%d of %d injected neurons reported used)", pct(u.UsageRate), u.UsedOfInj, u.Injected)
-	for _, src := range []string{engine.RecallSourcePrompt, engine.RecallSourceClaude} {
+	for _, src := range []string{engine.RecallSourcePrompt, engine.RecallSourceNotification, engine.RecallSourceClaude} {
 		if su := u.BySource[src]; su != nil {
 			row("  from "+src+" recalls", "%s (%d of %d)", pct(su.UsageRate), su.UsedOfInj, su.Injected)
 		}
@@ -557,7 +573,7 @@ func UsageByChange(events []store.Event) []UsagePeriod {
 
 func hasActivity(evs []store.Event) bool {
 	for _, ev := range evs {
-		if ev.Kind == engine.EventPrompt || ev.Kind == engine.EventRecall {
+		if ev.Kind == engine.EventPrompt || ev.Kind == engine.EventNotification || ev.Kind == engine.EventRecall {
 			return true
 		}
 	}

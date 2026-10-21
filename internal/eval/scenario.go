@@ -77,6 +77,9 @@ type Query struct {
 	// than Relevant, as in real use. Empty: the session mode reports
 	// nothing; the feedback mode reports the recalled relevant nodes.
 	Used []string `json:"used,omitempty"`
+	// OutputTail is the end of the task's output file for a notification
+	// (what the prompt hook reads for a failed task).
+	OutputTail string `json:"output_tail,omitempty"`
 	// Add lists nodes the agent stores after this query (and its used
 	// report) within the session; they are absent from the graph until then
 	// and get the engine's add-time context links.

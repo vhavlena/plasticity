@@ -65,12 +65,12 @@ func (r *Report) WriteText(w io.Writer) error {
 
 	fmt.Fprintln(w, "\ngraph after run")
 	tw = tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(tw, "config\tlearned\tspurious\tcross-project\tmean-w\tmax-deg\ttyped\tpreloaded\tpreloaded-w\tdormant\tpending\t")
+	fmt.Fprintln(tw, "config\tlearned\tspurious\tactive\tactive-spurious\tcross-project\tmean-w\tmax-deg\ttyped\tpreloaded\tpreloaded-w\tdormant\tpending\t")
 	for _, res := range r.Results {
 		g := res.Graph
-		fmt.Fprintf(tw, "%s\t%d\t%d (%s)\t%d\t%.3f\t%d\t%d\t%d\t%.3f\t%d\t%d\t\n", res.Config, g.Learned, g.Spurious,
-			pct(g.SpuriousRate), g.CrossProject, g.MeanWeight, g.MaxDegree, g.Typed, g.Preloaded, g.PreloadedWeight,
-			g.Dormant, g.PendingTraces)
+		fmt.Fprintf(tw, "%s\t%d\t%d (%s)\t%d\t%d\t%d\t%.3f\t%d\t%d\t%d\t%.3f\t%d\t%d\t\n", res.Config, g.Learned, g.Spurious,
+			pct(g.SpuriousRate), g.ActiveLearned, g.ActiveSpurious, g.CrossProject, g.MeanWeight, g.MaxDegree, g.Typed,
+			g.Preloaded, g.PreloadedWeight, g.Dormant, g.PendingTraces)
 	}
 	if err := tw.Flush(); err != nil {
 		return err

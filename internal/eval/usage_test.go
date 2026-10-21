@@ -240,3 +240,26 @@ func TestNotesAndUsageByChange(t *testing.T) {
 		t.Errorf("periods table: %v\n%s", err, b.String())
 	}
 }
+
+// Task notifications are not prompts: new events log them as notifications,
+// and older logs, where they were prompts, are classified by their text.
+func TestUsageNotifications(t *testing.T) {
+	l := &eventLog{}
+	l.prompt("S", "how do we store the graph", 0.9, "A")
+	l.prompt("S", "<task-notification>\n<status>completed</status>\n</task-notification>", 0.5, "B", "C") // legacy
+	l.add("S", engine.EventNotification, map[string]string{"text": "<task-notification>..."})
+	l.add("S", engine.EventRecall, map[string]any{"source": engine.RecallSourceNotification, "query": "run_analysis.py cannot locate tool",
+		"hits": []map[string]any{{"id": "P"}}, "confidence": 0.8})
+	u := AnalyzeUsage(l.evs)
+	if u.Prompts != 1 || u.Notifications != 2 {
+		t.Fatalf("prompts %d, notifications %d", u.Prompts, u.Notifications)
+	}
+	p, n := u.BySource[engine.RecallSourcePrompt], u.BySource[engine.RecallSourceNotification]
+	if p == nil || n == nil || p.Recalls != 1 || n.Recalls != 2 {
+		t.Fatalf("by source: %+v %+v", p, n)
+	}
+	var b strings.Builder
+	if err := u.WriteText(&b); err != nil || !strings.Contains(b.String(), "2 task notifications") || !strings.Contains(b.String(), "per notification") {
+		t.Fatalf("report:\n%s", b.String())
+	}
+}

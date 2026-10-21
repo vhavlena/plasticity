@@ -94,7 +94,9 @@ func score(hits []string, relevant []string, assoc map[string]bool) QueryMetrics
 	for i := 0; i < min(len(rel), max(len(hits), 1)); i++ {
 		ideal += 1 / math.Log2(float64(i+2))
 	}
-	m.Recall = float64(found) / float64(len(rel))
+	if len(rel) > 0 {
+		m.Recall = float64(found) / float64(len(rel))
+	}
 	if len(hits) > 0 {
 		m.Precision = float64(found) / float64(len(hits))
 	}

@@ -21,7 +21,9 @@ For development: `claude --plugin-dir /path/to/plasticity`.
 - **First session:** a background hook builds the engine and downloads a
   local embedding model (~90 MB). Until it is ready, search is keyword-only.
 - **Every prompt:** relevant memories are recalled and injected into the
-  context (up to 6 entries, ~5 ms).
+  context (up to 6 entries, ~5 ms). Task notifications of finished
+  background commands and agents are skipped, except for failed tasks,
+  which are recalled on their error output.
 - **While working:** Claude recalls more by itself when the need appears,
   for example before a design decision, in unfamiliar code, or when stuck on
   an error.
@@ -52,6 +54,7 @@ miss|noise|helped <what happened>` to record observations while evaluating.
 | `session_idle_hours` | 48 | a session left without a clean exit is closed after this idle time; resuming it later reopens it (and refreshes its episode) |
 | `episodes` | false | store each session as an `episode` neuron |
 | `embeddings` | `auto` | `auto` (local model), `ollama`, or `off` |
+| `notifications` | `failed` | task notifications of background commands and agents arrive as prompts: `failed` recalls only for failed tasks (on their error output, confident matches only), `all` treats them like prompts, `off` never recalls |
 | `log` | true | local event log (`plasticity eval report` summarizes it) |
 
 All data stays in `~/.plasticity/` (or `$PLASTICITY_HOME`) and never leaves

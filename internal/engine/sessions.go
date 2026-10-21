@@ -25,6 +25,9 @@ const (
 const (
 	EventSessionStart = "session_start"
 	EventPrompt       = "prompt"
+	// EventNotification is a task notification delivered as a prompt; it is
+	// not counted as a prompt of the session.
+	EventNotification = "notification"
 	EventRecall       = "recall"
 	EventUsed         = "used"
 	EventAdd          = "add"
@@ -64,6 +67,9 @@ func (e *Engine) Note(session, kind, text string, ids []string) error {
 const (
 	RecallSourcePrompt = "prompt" // automatic recall for a user prompt (hook)
 	RecallSourceClaude = "claude" // recall Claude ran itself during a session
+	// RecallSourceNotification: automatic recall for a failed background
+	// task's notification (hook).
+	RecallSourceNotification = "notification"
 )
 
 // LogRecall logs a recall of a session: its source, query, hits and
@@ -77,7 +83,7 @@ func (e *Engine) LogRecall(session, source, query string, r *RecallResult, laten
 		"source": source, "query": truncate(query, 500), "hits": hits, "confidence": r.Confidence,
 		"lexical": r.LexicalConfidence, "semantic": r.SemanticConfidence, "seeds": r.Seeds,
 		"latency_ms": float64(latency) / float64(time.Millisecond), "injected_chars": injectedChars,
-		"recall_id": r.RecallID, "trace_skipped": r.TraceSkipped,
+		"recall_id": r.RecallID, "trace_skipped": r.TraceSkipped, "suppressed": r.Suppressed,
 	})
 }
 
@@ -213,6 +219,17 @@ func (e *Engine) NotePrompt(id, project, prompt string) error {
 		return err
 	}
 	e.Log(id, EventPrompt, map[string]string{"prompt": truncate(prompt, 2000)})
+	return nil
+}
+
+// NoteNotification records a task notification delivered to a session as a
+// prompt. Unlike NotePrompt it neither counts as a prompt nor becomes the
+// session's first prompt.
+func (e *Engine) NoteNotification(id, project, text string) error {
+	if err := e.st.Write(func(tx *store.Tx) error { return tx.TouchSession(id, project, timestamp()) }); err != nil {
+		return err
+	}
+	e.Log(id, EventNotification, map[string]string{"text": truncate(text, 2000)})
 	return nil
 }
 

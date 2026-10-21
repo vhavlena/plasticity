@@ -81,6 +81,11 @@ type GraphHealth struct {
 	MaxDegree    int     `json:"max_learned_degree"`
 	// CrossProject learned edges connect nodes of different projects.
 	CrossProject int `json:"cross_project_edges"`
+	// Active learned edges are strong enough to carry activation from a
+	// fully active neighbor (effective weight · hop decay ≥ firing
+	// threshold); ActiveSpurious of them are spurious.
+	ActiveLearned  int `json:"active_learned_edges"`
+	ActiveSpurious int `json:"active_spurious_edges"`
 	// PreloadedWeight is the mean effective weight of the preloaded
 	// associative edges at the end (their scenario weight at the start).
 	PreloadedWeight float64 `json:"mean_preloaded_weight"`
@@ -165,6 +170,7 @@ func Run(s *Scenario, cfg Config, dir string) (*Result, error) {
 		byKey[n.Key] = n
 	}
 
+	hookCfg := hooks.ConfigFromEnv() // e.g. PLASTICITY_NOTIFICATIONS=all replays the old behavior
 	var recallT, learnT, consT []time.Duration
 	sessionsRun := 0
 	consolidate := func() error {
@@ -192,12 +198,19 @@ func Run(s *Scenario, cfg Config, dir string) (*Result, error) {
 					sid = fmt.Sprintf("%s-q%d", sessionID, qi)
 				}
 				qr := QueryResult{Pass: pass, Session: si, Query: qi, Text: q.Q, Source: q.Source, Hits: []string{}}
-				// Prompts and notifications go through the prompt hook's filter.
-				if (q.Source == SourcePrompt || q.Source == SourceNotification) && hooks.SkipsRecall(q.Q) {
-					qr.Skipped = true
-				} else {
+				// Prompts and notifications are planned like the prompt hook does.
+				req := engine.RecallRequest{Query: q.Q, Session: sid, Project: sess.Project, Limit: cfg.K}
+				if q.Source == SourcePrompt || q.Source == SourceNotification {
+					plan := hookCfg.PlanRecall(q.Q, func(string) string { return q.OutputTail })
+					qr.Skipped = plan.Skip
+					req.Query, req.MinConfidence = plan.Query, plan.MinConfidence
+					if plan.Limit > 0 {
+						req.Limit = min(req.Limit, plan.Limit)
+					}
+				}
+				if !qr.Skipped {
 					t := time.Now()
-					r, err := e.Recall(engine.RecallRequest{Query: q.Q, Session: sid, Limit: cfg.K})
+					r, err := e.Recall(req)
 					d := time.Since(t)
 					if err != nil {
 						return nil, fmt.Errorf("pass %d session %d query %d: %w", pass, si, qi, err)
@@ -411,8 +424,15 @@ func graphHealth(e *engine.Engine, s *Scenario, keyOf, project map[string]string
 		sum += ed.EffectiveWeight
 		degree[ed.Src]++
 		degree[ed.Dst]++
-		if !coRelevant[[2]string{a, b}] {
+		spurious := !coRelevant[[2]string{a, b}]
+		if spurious {
 			g.Spurious++
+		}
+		if ed.EffectiveWeight*e.P.HopDecay >= e.P.FiringThreshold {
+			g.ActiveLearned++
+			if spurious {
+				g.ActiveSpurious++
+			}
 		}
 		if project[a] != "" && project[b] != "" && project[a] != project[b] {
 			g.CrossProject++
