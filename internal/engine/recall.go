@@ -24,8 +24,14 @@ func (e *Engine) Search(query string, limit int) ([]store.SearchHit, error) {
 	var hits []store.SearchHit
 	err := e.st.Read(func(tx *store.Tx) error {
 		var err error
-		hits, err = tx.Search(MatchExpr(query), e.bm25Weights(), limit)
-		return err
+		if hits, err = tx.Search(MatchExpr(query), e.bm25Weights(), limit); err != nil {
+			return err
+		}
+		nodes := make([]*model.Node, len(hits))
+		for i, h := range hits {
+			nodes[i] = h.Node
+		}
+		return fillSuccessorTitles(tx, nodes...)
 	})
 	if hits == nil {
 		hits = []store.SearchHit{}
@@ -83,6 +89,12 @@ type RecallRequest struct {
 	// ExcludeTypes leaves neurons of these types out of the hits; they
 	// still carry activation to their neighbors.
 	ExcludeTypes []model.NodeType
+	// ExcludeSuperseded leaves superseded neurons out of the hits (they still
+	// carry activation to their neighbors): each one's activation goes to its
+	// current successor instead, so a query worded like the old neuron finds
+	// the new one. Without it, superseded neurons stay visible with their
+	// score scaled by superseded_factor.
+	ExcludeSuperseded bool
 }
 
 // RecallHit is one recalled neuron.
@@ -98,6 +110,9 @@ type RecallHit struct {
 	Hops       int      `json:"hops"`
 	Path       []string `json:"path"`
 	PathTitles []string `json:"path_titles"`
+	// Supersedes are the titles of superseded neurons whose activation was
+	// redirected to this one (with ExcludeSuperseded).
+	Supersedes []string `json:"supersedes,omitempty"`
 }
 
 // RecallResult is the answer to a recall.
@@ -212,19 +227,32 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 		if err != nil {
 			return err
 		}
+		act := spread.Activations
+		redirected := map[string][]string{} // successor → superseded neurons it took activation from
+		if req.ExcludeSuperseded {
+			if act, ids, err = redirectSuperseded(tx, act, ids, graphScore, nodes, redirected); err != nil {
+				return err
+			}
+		}
 		acc, err := tx.Accesses(ids)
 		if err != nil {
 			return err
 		}
 		for _, id := range ids {
-			n, a := nodes[id], spread.Activations[id]
-			if n == nil || slices.Contains(req.ExcludeTypes, n.Type) {
+			n, a := nodes[id], act[id]
+			if n == nil || slices.Contains(req.ExcludeTypes, n.Type) || req.ExcludeSuperseded && n.SupersededBy != "" {
 				continue
 			}
 			b := plasticity.BaseLevel(acc[id], tick, p.ActrDecay)
 			h := RecallHit{
 				Node: n, Activation: a.Score, IsSeed: a.IsSeed, Hops: a.Hops, Path: a.Path,
 				Score: p.ScoreGraph*graphScore[id] + p.ScoreBaseLevel*plasticity.Sigmoid(b) + p.ScoreImportance*n.Importance,
+			}
+			if n.SupersededBy != "" {
+				h.Score *= p.SupersededFactor
+			}
+			for _, old := range redirected[id] {
+				h.Supersedes = append(h.Supersedes, nodes[old].Title)
 			}
 			if len(acc[id]) > 0 {
 				h.BaseLevel = &b
@@ -238,6 +266,13 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 				}
 			}
 			res.Hits = append(res.Hits, h)
+		}
+		hitNodes := make([]*model.Node, len(res.Hits))
+		for i, h := range res.Hits {
+			hitNodes[i] = h.Node
+		}
+		if err := fillSuccessorTitles(tx, hitNodes...); err != nil {
+			return err
 		}
 		sort.Slice(res.Hits, func(i, j int) bool {
 			if res.Hits[i].Score != res.Hits[j].Score {
@@ -307,4 +342,43 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 		return tx.InsertTrace(tr)
 	})
 	return res, err
+}
+
+// redirectSuperseded moves the activation of every reached superseded neuron
+// to its current successor: the successor's activation (and graph score)
+// becomes the maximum of its own and the old neuron's, and if that came from
+// the old neuron its path is the old one's path followed by the successor.
+// Successors not reached by spreading are added to ids (and nodes).
+// redirected collects, per successor, the superseded neurons it absorbed.
+func redirectSuperseded(tx *store.Tx, act map[string]*retrieval.Activation, ids []string, graphScore map[string]float64,
+	nodes map[string]*model.Node, redirected map[string][]string) (map[string]*retrieval.Activation, []string, error) {
+	out := make(map[string]*retrieval.Activation, len(act))
+	for id, a := range act {
+		out[id] = a
+	}
+	for _, id := range ids {
+		n := nodes[id]
+		if n == nil || n.SupersededBy == "" {
+			continue
+		}
+		s, err := currentSuccessor(tx, id, nodes)
+		if err != nil {
+			return nil, nil, err
+		}
+		if s == "" {
+			continue // broken or cyclic chain: nothing to redirect to
+		}
+		redirected[s] = append(redirected[s], id)
+		old := act[id]
+		if cur, ok := out[s]; !ok || cur.Score < old.Score {
+			if !ok {
+				ids = append(ids, s)
+			}
+			out[s] = &retrieval.Activation{ID: s, Score: old.Score, Seed: old.Seed, Hops: old.Hops + 1,
+				Path: append(slices.Clone(old.Path), s), IsSeed: ok && cur.IsSeed}
+		}
+		graphScore[s] = math.Max(graphScore[s], graphScore[id])
+	}
+	sort.Strings(ids)
+	return out, ids, nil
 }

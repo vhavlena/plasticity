@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -495,7 +497,15 @@ func TestMigrationDropsRetiredPruneThreshold(t *testing.T) {
 		if err := tx.SetParam("hop_decay", "0.7"); err != nil {
 			return err
 		}
-		_, err := tx.tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, len(migrations)-1))
+		// Back to the version before the prune migration, undoing the later ones.
+		for _, drop := range []string{`ALTER TABLE session_nodes DROP COLUMN prompt_no`, `ALTER TABLE nodes DROP COLUMN superseded_by`} {
+			if _, err := tx.tx.Exec(drop); err != nil {
+				return err
+			}
+		}
+		_, err := tx.tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, slices.IndexFunc(migrations, func(m string) bool {
+			return strings.Contains(m, "DELETE FROM params WHERE key = 'prune_threshold'")
+		})))
 		return err
 	})
 	s.Close()

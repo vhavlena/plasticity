@@ -147,7 +147,7 @@ button:hover { border-color: var(--muted); }
 			<button id="fit">Fit view</button>
 			<button id="relayout">Re-layout</button>
 		</div>
-		<div class="sub">Drag to pan, scroll to zoom, drag a neuron to move it, click it for details. Size grows with importance and use; edge thickness is the current (effective) weight.</div>
+		<div class="sub">Drag to pan, scroll to zoom, drag a neuron to move it, click it for details. Size grows with importance and use; edge thickness is the current (effective) weight; thin dashed links are too weak to spread activation (tentative).</div>
 	</aside>
 	<main id="stage">
 		<button id="toggle">☰ Filters</button>
@@ -183,7 +183,10 @@ for (const e of DATA.edges) {
 	const s = byId.get(e.src), t = byId.get(e.dst);
 	if (!s || !t) continue;
 	const w = e.effective_weight ?? e.weight ?? 0;
-	const ed = { s, t, kind: e.kind, w, raw: e };
+	// Tentative: an associative link too weak to spread activation
+	// (below firing_threshold / hop_decay), e.g. an unconfirmed context link.
+	const tentative = e.kind === "associative" && DATA.propagation_weight !== undefined && w < DATA.propagation_weight;
+	const ed = { s, t, kind: e.kind, w, tentative, raw: e };
 	edges.push(ed);
 	s.adj.push(ed);
 	t.adj.push(ed);
@@ -555,8 +558,8 @@ function draw() {
 		ctx.globalAlpha = on ? 1 : 0.15;
 		ctx.strokeStyle = e.kind === "associative" ? colors.edge : colors["k-" + e.kind];
 		if (on && focus && e.kind === "associative") ctx.strokeStyle = colors.muted;
-		ctx.lineWidth = (0.6 + 3.4 * e.w) / Math.sqrt(k);
-		ctx.setLineDash(e.kind === "contradicts" ? [6 / k, 4 / k] : []);
+		ctx.lineWidth = (e.tentative ? 0.5 : 0.6 + 3.4 * e.w) / Math.sqrt(k);
+		ctx.setLineDash(e.kind === "contradicts" ? [6 / k, 4 / k] : e.tentative ? [2 / k, 3 / k] : []);
 		ctx.beginPath();
 		ctx.moveTo(e.s.x, e.s.y);
 		ctx.lineTo(e.t.x, e.t.y);

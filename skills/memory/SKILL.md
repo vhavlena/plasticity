@@ -58,6 +58,22 @@ plasticity add -t decision --title "Use SQLite WAL for storage" \
 exists. Refine it instead (`plasticity update ID -c "..." -r "..."`), or link to it.
 Use `--force` only if it is genuinely different.
 
+**When new knowledge replaces old** (a refuted fix, a revised decision, the
+final version of an iterated design), mark the old neuron superseded. It is then
+never injected again; recall finds the new one in its place, and the history
+stays searchable:
+
+```sh
+plasticity add -t decision --title "..." -c "..." --supersedes OLD_ID --session <SESSION_ID>
+plasticity update OLD_ID --superseded-by NEW_ID     # after the fact; --clear-superseded undoes it
+```
+
+The `add` result lists `similar` existing neurons: check whether one is now
+outdated. Supersede only what is **wholly** replaced. If an old neuron is still
+partly true, update it instead. Example: a neuron diagnosing why disequations
+were dropped, whose proposed fix was later refuted, keeps its valid diagnosis;
+update it to point to the neuron with the correct fix rather than superseding it.
+
 **Do not store**: transient task state, things obvious from the code or git
 history, secrets/credentials, or guesses you have not verified.
 
@@ -86,8 +102,8 @@ plasticity get <ID>                                                             
   storing what you find.
 
 Injected memories are *possibly* relevant: verify before relying on them.
-If one is wrong or outdated, fix it with `plasticity update ID ...` (or
-`plasticity delete ID` if it is simply false).
+If one is wrong or outdated, fix it with `plasticity update ID ...`, mark it
+`--superseded-by` its replacement, or `plasticity delete ID` if it is simply false.
 
 ## 3. Report what helped
 

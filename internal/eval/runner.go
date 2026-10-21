@@ -197,10 +197,19 @@ func Run(s *Scenario, cfg Config, dir string) (*Result, error) {
 				case LearnFeedback:
 					sid = fmt.Sprintf("%s-q%d", sessionID, qi)
 				}
+				// User prompts advance the session's prompt count (as in the
+				// prompt hook), which bounds the context window of added neurons;
+				// Claude's own recalls and notifications do not.
+				if q.Source == "" || q.Source == SourcePrompt {
+					if err := e.NotePrompt(sessionID, sess.Project, q.Q); err != nil {
+						return nil, err
+					}
+				}
 				qr := QueryResult{Pass: pass, Session: si, Query: qi, Text: q.Q, Source: q.Source, Hits: []string{}}
 				// Prompts and notifications are planned like the prompt hook does.
 				req := engine.RecallRequest{Query: q.Q, Session: sid, Project: sess.Project, Limit: cfg.K}
 				if q.Source == SourcePrompt || q.Source == SourceNotification {
+					req.ExcludeSuperseded = true // as the prompt hook
 					plan := hookCfg.PlanRecall(q.Q, func(string) string { return q.OutputTail })
 					qr.Skipped = plan.Skip
 					req.Query, req.MinConfidence = plan.Query, plan.MinConfidence
@@ -235,6 +244,9 @@ func Run(s *Scenario, cfg Config, dir string) (*Result, error) {
 				for _, k := range q.Add {
 					if err := addDuring(e, byKey[k], sessionID, idOf, keyOf); err != nil {
 						return nil, fmt.Errorf("pass %d session %d query %d: add %q: %w", pass, si, qi, k, err)
+					}
+					if err := applySupersession(e, s, idOf); err != nil {
+						return nil, err
 					}
 				}
 			}
@@ -305,7 +317,25 @@ func load(e *engine.Engine, s *Scenario) (idOf, keyOf map[string]string, err err
 	for i, l := range s.Links {
 		links[i] = engine.LinkSpec{Src: idOf[l.Src], Dst: idOf[l.Dst], Kind: l.Kind, Weight: l.Weight}
 	}
-	return idOf, keyOf, e.AddLinks(links)
+	if err := e.AddLinks(links); err != nil {
+		return nil, nil, err
+	}
+	return idOf, keyOf, applySupersession(e, s, idOf)
+}
+
+// applySupersession marks every scenario supersession whose two neurons
+// exist (again marking one is harmless).
+func applySupersession(e *engine.Engine, s *Scenario, idOf map[string]string) error {
+	for _, n := range s.Nodes {
+		old, succ := idOf[n.Key], idOf[n.SupersededBy]
+		if n.SupersededBy == "" || old == "" || succ == "" {
+			continue
+		}
+		if _, err := e.UpdateNode(old, engine.NodePatch{SupersededBy: &succ}); err != nil {
+			return fmt.Errorf("supersede %q by %q: %w", n.Key, n.SupersededBy, err)
+		}
+	}
+	return nil
 }
 
 // addDuring stores a node during a session the way `plasticity add

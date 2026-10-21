@@ -34,8 +34,10 @@ type (
 		Report *engine.LearnReport `json:"report"`
 	}
 	addPayload struct {
-		ID          string `json:"id"`
-		DuplicateOf string `json:"duplicate_of"`
+		ID          string   `json:"id"`
+		DuplicateOf string   `json:"duplicate_of"`
+		Supersedes  []string `json:"supersedes"`
+		Similar     int      `json:"similar"`
 	}
 	errorPayload struct {
 		Op string `json:"op"`
@@ -97,10 +99,15 @@ type Usage struct {
 
 	// Creation (plasticity add). Created counts neurons added with a
 	// session; CreatedOutside those added without one (e.g. by hand).
-	Created           int     `json:"created"`
-	CreatedOutside    int     `json:"created_outside_sessions"`
-	Duplicates        int     `json:"duplicates"`     // adds refused as near-duplicates
-	DuplicateRate     float64 `json:"duplicate_rate"` // duplicates / (created + duplicates)
+	Created        int     `json:"created"`
+	CreatedOutside int     `json:"created_outside_sessions"`
+	Duplicates     int     `json:"duplicates"`     // adds refused as near-duplicates
+	DuplicateRate  float64 `json:"duplicate_rate"` // duplicates / (created + duplicates)
+	// Supersession at add time: adds that listed similar neurons, and adds
+	// that superseded some (with the number of neurons superseded).
+	AddsWithSimilar   int     `json:"adds_with_similar"`
+	AddsSuperseding   int     `json:"adds_superseding"`
+	SupersededAtAdd   int     `json:"superseded_at_add"`
 	CreatedPerSession float64 `json:"created_per_session"`
 	CreatedRecalled   int     `json:"created_recalled"` // created neurons injected in a later session
 	CreatedUsed       int     `json:"created_used"`     // created neurons reported used in a later session
@@ -315,6 +322,13 @@ func AnalyzeUsage(events []store.Event) *Usage {
 				u.Duplicates++
 				continue
 			}
+			if p.Similar > 0 {
+				u.AddsWithSimilar++
+			}
+			if len(p.Supersedes) > 0 {
+				u.AddsSuperseding++
+				u.SupersededAtAdd += len(p.Supersedes)
+			}
 			if ev.Session == "" {
 				u.CreatedOutside++
 				continue
@@ -471,6 +485,7 @@ func (u *Usage) WriteText(w io.Writer) error {
 	fmt.Fprintln(tw, "creation")
 	row("created", "%d (%.1f per session), %d episodes, %d outside sessions", u.Created, u.CreatedPerSession, u.Episodes, u.CreatedOutside)
 	row("duplicates caught", "%d (%s of adds)", u.Duplicates, pct(u.DuplicateRate))
+	row("supersession at add", "%d of %d adds with similar neurons; %d adds superseded %d neurons", u.AddsWithSimilar, u.Created+u.CreatedOutside, u.AddsSuperseding, u.SupersededAtAdd)
 	row("reused later", "%d recalled, %d used in a later session (of %d created)", u.CreatedRecalled, u.CreatedUsed, u.Created)
 	row("nudges", "%d, %s answered with add/used", u.Nudges, pct(u.NudgeResponse))
 	fmt.Fprintln(tw, "learning")

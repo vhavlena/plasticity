@@ -60,6 +60,13 @@ type Node struct {
 	Source     string   `json:"source,omitempty"`
 	Importance float64  `json:"importance"`
 	Dormant    bool     `json:"dormant,omitempty"`
+	// SupersededBy is the neuron that replaces this one ("" if current). A
+	// superseded neuron is never injected by the prompt hook; recall
+	// redirects its activation to the successor.
+	SupersededBy string `json:"superseded_by,omitempty"`
+	// SuccessorTitle is the title of SupersededBy, filled in for display and
+	// never persisted.
+	SuccessorTitle string `json:"superseded_by_title,omitempty"`
 	// Fires counts the recalls in which this neuron was activated. It is the
 	// neuron's own logical clock: synapses age by their endpoints' firings.
 	Fires int64 `json:"fires"`

@@ -146,4 +146,9 @@ CREATE INDEX events_kind ON events(kind, id);
 `,
 	// prune_threshold was retired when pruning was replaced by weight floors.
 	`DELETE FROM params WHERE key = 'prune_threshold';`,
+	// prompt_no: the session's prompt count when the neuron was last used or
+	// created there; new neurons link only to the session's recent ones.
+	`ALTER TABLE session_nodes ADD COLUMN prompt_no INTEGER NOT NULL DEFAULT 0;`,
+	// superseded_by: the neuron that replaces this one ('' if current).
+	`ALTER TABLE nodes ADD COLUMN superseded_by TEXT NOT NULL DEFAULT '';`,
 }

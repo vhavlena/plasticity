@@ -116,7 +116,7 @@ func tagsJSON(tags []string) string {
 
 // ---------------------------------------------------------------- nodes
 
-const nodeCols = `id, type, title, content, rationale, tags, source, importance, dormant, fires, created_tick, created_at, updated_at`
+const nodeCols = `id, type, title, content, rationale, tags, source, importance, dormant, superseded_by, fires, created_tick, created_at, updated_at`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -127,7 +127,7 @@ func scanNode(r scanner, extra ...any) (*model.Node, error) {
 	var dormant int
 	var created, updated int64
 	dest := append([]any{&n.ID, &n.Type, &n.Title, &n.Content, &n.Rationale, &tags, &n.Source,
-		&n.Importance, &dormant, &n.Fires, &n.CreatedTick, &created, &updated}, extra...)
+		&n.Importance, &dormant, &n.SupersededBy, &n.Fires, &n.CreatedTick, &created, &updated}, extra...)
 	if err := r.Scan(dest...); err != nil {
 		return nil, err
 	}
@@ -162,23 +162,35 @@ func (t *Tx) FindTitle(pattern string, same func(title string) bool) (*model.Nod
 
 // InsertNode adds a new node.
 func (t *Tx) InsertNode(n *model.Node) error {
-	_, err := t.tx.Exec(`INSERT INTO nodes (`+nodeCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := t.tx.Exec(`INSERT INTO nodes (`+nodeCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		n.ID, n.Type, n.Title, n.Content, n.Rationale, tagsJSON(n.Tags), n.Source,
-		n.Importance, b2i(n.Dormant), n.Fires, n.CreatedTick, ts(n.CreatedAt), ts(n.UpdatedAt))
+		n.Importance, b2i(n.Dormant), n.SupersededBy, n.Fires, n.CreatedTick, ts(n.CreatedAt), ts(n.UpdatedAt))
 	return err
 }
 
 // UpdateNode overwrites all mutable fields of an existing node.
 func (t *Tx) UpdateNode(n *model.Node) error {
 	res, err := t.tx.Exec(`UPDATE nodes SET type=?, title=?, content=?, rationale=?, tags=?, source=?,
-		importance=?, dormant=?, updated_at=? WHERE id=?`,
+		importance=?, dormant=?, superseded_by=?, updated_at=? WHERE id=?`,
 		n.Type, n.Title, n.Content, n.Rationale, tagsJSON(n.Tags), n.Source,
-		n.Importance, b2i(n.Dormant), ts(n.UpdatedAt), n.ID)
+		n.Importance, b2i(n.Dormant), n.SupersededBy, ts(n.UpdatedAt), n.ID)
 	if err != nil {
 		return err
 	}
 	if k, _ := res.RowsAffected(); k == 0 {
 		return fmt.Errorf("node %s: %w", n.ID, ErrNotFound)
+	}
+	return nil
+}
+
+// SetSupersededBy records that id is replaced by successor ("" clears it).
+func (t *Tx) SetSupersededBy(id, successor string) error {
+	res, err := t.tx.Exec(`UPDATE nodes SET superseded_by=? WHERE id=?`, successor, id)
+	if err != nil {
+		return err
+	}
+	if k, _ := res.RowsAffected(); k == 0 {
+		return fmt.Errorf("node %s: %w", id, ErrNotFound)
 	}
 	return nil
 }
@@ -936,11 +948,15 @@ func (t *Tx) CountEndedSessions() (int, error) {
 	return n, err
 }
 
-// AddSessionNodes records neurons a session used or created.
+// AddSessionNodes records neurons a session used or created, at the
+// session's current prompt count (a neuron recorded again moves to the later
+// prompt).
 func (t *Tx) AddSessionNodes(session, role string, ids []string, at time.Time) error {
 	for i, id := range ids {
-		if _, err := t.tx.Exec(`INSERT INTO session_nodes (session, node_id, role, ts) VALUES (?, ?, ?, ?)
-			ON CONFLICT DO NOTHING`, session, id, role, ts(at)+int64(i)); err != nil {
+		if _, err := t.tx.Exec(`INSERT INTO session_nodes (session, node_id, role, ts, prompt_no)
+			VALUES (?, ?, ?, ?, coalesce((SELECT prompts FROM sessions WHERE id = ?), 0))
+			ON CONFLICT DO UPDATE SET prompt_no = max(prompt_no, excluded.prompt_no)`,
+			session, id, role, ts(at)+int64(i), session); err != nil {
 			return err
 		}
 	}
@@ -950,8 +966,14 @@ func (t *Tx) AddSessionNodes(session, role string, ids []string, at time.Time) e
 // SessionNodes returns the neurons a session recorded under the given roles,
 // oldest first, without duplicates.
 func (t *Tx) SessionNodes(session string, roles ...string) ([]string, error) {
+	return t.SessionNodesSince(session, 0, roles...)
+}
+
+// SessionNodesSince is SessionNodes restricted to neurons recorded at prompt
+// minPrompt or later.
+func (t *Tx) SessionNodesSince(session string, minPrompt int, roles ...string) ([]string, error) {
 	rows, err := t.tx.Query(`SELECT node_id FROM session_nodes WHERE session = ? AND role IN (`+placeholders(len(roles))+`)
-		GROUP BY node_id ORDER BY min(ts)`, append([]any{session}, anys(roles)...)...)
+		GROUP BY node_id HAVING max(prompt_no) >= ? ORDER BY min(ts)`, append(append([]any{session}, anys(roles)...), minPrompt)...)
 	if err != nil {
 		return nil, err
 	}

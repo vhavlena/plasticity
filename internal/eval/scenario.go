@@ -33,6 +33,9 @@ type ScenarioNode struct {
 	// Project is the project the neuron was created in; hits from another
 	// project than the query's count as cross-project noise.
 	Project string `json:"project,omitempty"`
+	// SupersededBy is the key of the neuron that replaces this one; it is
+	// marked as soon as both exist (at load, or when one is added).
+	SupersededBy string `json:"superseded_by,omitempty"`
 }
 
 // ScenarioLink is an explicit (authored) edge.
@@ -135,6 +138,11 @@ func (s *Scenario) Validate() error {
 		mn := model.Node{Type: n.Type, Title: n.Title, Importance: n.Importance}
 		if err := mn.Validate(); err != nil {
 			return fmt.Errorf("node %q: %w", n.Key, err)
+		}
+	}
+	for _, n := range s.Nodes {
+		if n.SupersededBy != "" && (!keys[n.SupersededBy] || n.SupersededBy == n.Key) {
+			return fmt.Errorf("node %q: superseded_by names an unknown node or itself: %q", n.Key, n.SupersededBy)
 		}
 	}
 	deferred := s.deferred()

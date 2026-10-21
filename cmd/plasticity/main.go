@@ -108,7 +108,7 @@ func newRoot(out io.Writer, in io.Reader) *cobra.Command {
 	root.AddCommand(
 		a.initCmd(), a.addCmd(), a.usedCmd(), a.noteCmd(), a.logCmd(), a.hookCmd(), a.getCmd(), a.updateCmd(), a.deleteCmd(),
 		a.linkCmd(), a.unlinkCmd(), a.searchCmd(), a.recallCmd(),
-		a.reinforceCmd(), a.feedbackCmd(), a.consolidateCmd(),
+		a.reinforceCmd(), a.feedbackCmd(), a.consolidateCmd(), a.maintainCmd(),
 		a.statsCmd(), a.sessionsCmd(), a.exportCmd(), a.vizCmd(), a.paramsCmd(), a.embedCmd(), a.evalCmd(),
 	)
 	return root
@@ -173,7 +173,12 @@ near-identical embedding exists, nothing is inserted and the result names it in
 "duplicate_of" (update or link it instead, or pass --force).
 
 With --session, the neuron is linked to the neurons the session used or created
-before it, so new knowledge is encoded in its context.`,
+before it, so new knowledge is encoded in its context.
+
+With --supersedes, the listed neurons are marked as replaced by the new one: the
+prompt hook no longer injects them and recall redirects to the new neuron. The
+result lists "similar" existing neurons; if one of them is outdated, mark it with
+'update ID --superseded-by NEW' (or update its content if it is partly true).`,
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			n := &model.Node{Type: model.NodeType(f.typ), Title: f.title, Content: f.content,
@@ -212,6 +217,7 @@ before it, so new knowledge is encoded in its context.`,
 	c.Flags().StringArrayVar(&links, "link", nil, "link new node → ID, as ID[:kind[:weight]] (repeatable)")
 	c.Flags().StringVarP(&opt.Session, "session", "s", "", "session ID: link to the session's context and record as created by it")
 	c.Flags().BoolVar(&opt.Force, "force", false, "insert even if a near-duplicate exists")
+	c.Flags().StringSliceVar(&opt.Supersedes, "supersedes", nil, "IDs of neurons the new one replaces (they are no longer injected)")
 	return c
 }
 
@@ -325,6 +331,8 @@ func (a *app) getCmd() *cobra.Command {
 
 func (a *app) updateCmd() *cobra.Command {
 	var f nodeFlags
+	var supersededBy string
+	var clearSuperseded bool
 	c := &cobra.Command{
 		Use:   "update ID",
 		Short: "Update fields of a neuron (only the given flags change)",
@@ -354,10 +362,22 @@ func (a *app) updateCmd() *cobra.Command {
 			if ch("importance") {
 				p.Importance = &f.importance
 			}
+			if ch("superseded-by") && clearSuperseded {
+				return fmt.Errorf("--superseded-by and --clear-superseded exclude each other")
+			}
+			if ch("superseded-by") {
+				p.SupersededBy = &supersededBy
+			}
+			if clearSuperseded {
+				none := ""
+				p.SupersededBy = &none
+			}
 			return a.with(func(e *engine.Engine) (any, error) { return e.UpdateNode(args[0], p) })
 		},
 	}
 	f.register(c)
+	c.Flags().StringVar(&supersededBy, "superseded-by", "", "mark the neuron as replaced by this ID")
+	c.Flags().BoolVar(&clearSuperseded, "clear-superseded", false, "mark the neuron as current again")
 	return c
 }
 
@@ -510,6 +530,36 @@ func (a *app) consolidateCmd() *cobra.Command {
 	return c
 }
 
+func (a *app) maintainCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "maintain",
+		Short: "One-off repairs of an existing graph",
+	}
+	var from, to float64
+	var dryRun bool
+	demote := &cobra.Command{
+		Use:   "demote-unconfirmed",
+		Short: "Lower context links that were never co-used to the tentative weight",
+		Long: "Context links made before they became tentative (weight 0.3) spread activation\n" +
+			"although nothing confirmed them. This lowers associative links with no\n" +
+			"co-activation whose weight is still --from to --to (default: context_link_weight).",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return a.with(func(e *engine.Engine) (any, error) {
+				if !cmd.Flags().Changed("to") {
+					to = e.P.ContextLinkWeight
+				}
+				return e.DemoteUnconfirmed(from, to, dryRun)
+			})
+		},
+	}
+	demote.Flags().Float64Var(&from, "from", 0.3, "weight of the links to demote (the old context_link_weight)")
+	demote.Flags().Float64Var(&to, "to", 0, "new weight (default: context_link_weight)")
+	demote.Flags().BoolVar(&dryRun, "dry-run", false, "only list the links that would change")
+	c.AddCommand(demote)
+	return c
+}
+
 func (a *app) statsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "stats",
@@ -628,6 +678,9 @@ func (a *app) paramsCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, args []string) error {
 			return a.with(func(e *engine.Engine) (any, error) {
 				err := e.SetParam(args[0], args[1])
+				for _, w := range e.P.Warnings() {
+					fmt.Fprintln(os.Stderr, "warning:", w)
+				}
 				return e.P, err
 			})
 		},

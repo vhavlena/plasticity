@@ -200,7 +200,8 @@ Run every plasticity command as %s ... (it selects this session's memory).
   %s recall "<specific question or error>" --session %s
 - Store durable knowledge (decisions with rationale, root causes, working procedures, preferences):
   %s add -t decision|fact|procedure|concept|rationale|question --title "..." -c "..." -r "why" --importance 0..1 --session %s
-  (importance: 0.8-1 user preferences/corrections and costly decisions or root causes, 0.4-0.7 useful facts and procedures, 0.1-0.3 minor details)
+  (importance: 0.8-1 user preferences/corrections and costly decisions or root causes, 0.4-0.7 useful facts and procedures, 0.1-0.3 minor details;
+  add --supersedes OLD_ID when the new neuron replaces an outdated one)
 - Report memories you actually used (also ones you found via plasticity search/recall):
   %s used --session %s ID [ID...]
 Use the plasticity:memory skill for guidance.`, st.Nodes, cfg.Scope, search, id, cli, cli, id, cli, id, cli, id)
@@ -253,9 +254,10 @@ func Prompt(e *engine.Engine, in Input, project string, cfg Config) (*Output, er
 	start := time.Now()
 	// Episodes quote raw prompts: they match many queries lexically and would
 	// crowd knowledge out of the few injected slots. They stay reachable
-	// through explicit recall and search.
+	// through explicit recall and search. Superseded neurons are never
+	// injected; their successors are, in their place.
 	r, err := e.Recall(engine.RecallRequest{Query: plan.Query, Session: in.SessionID, Project: project, Limit: limit,
-		MinConfidence: plan.MinConfidence, ExcludeTypes: []model.NodeType{model.TypeEpisode}})
+		MinConfidence: plan.MinConfidence, ExcludeTypes: []model.NodeType{model.TypeEpisode}, ExcludeSuperseded: true})
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +288,9 @@ func FormatMemories(r *engine.RecallResult, session, cli string, budget int) str
 		if n.Rationale != "" {
 			line += " Why: " + truncate(n.Rationale, 140)
 		}
-		if !h.IsSeed && len(h.PathTitles) > 1 {
+		if len(h.Supersedes) > 0 {
+			line += fmt.Sprintf(" (supersedes: %q)", truncate(strings.Join(h.Supersedes, "; "), 80))
+		} else if !h.IsSeed && len(h.PathTitles) > 1 {
 			line += fmt.Sprintf(" (associated via %q)", truncate(h.PathTitles[len(h.PathTitles)-2], 60))
 		}
 		line += "\n"

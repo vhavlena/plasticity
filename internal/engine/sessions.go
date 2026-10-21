@@ -35,8 +35,9 @@ const (
 	EventEpisode      = "episode"
 	EventConsolidate  = "consolidate"
 	EventError        = "error"
-	EventParam        = "param" // a parameter or the embedder changed
-	EventNote         = "note"  // the user's observation (plasticity note)
+	EventParam        = "param"    // a parameter or the embedder changed
+	EventNote         = "note"     // the user's observation (plasticity note)
+	EventMaintain     = "maintain" // a one-off repair of the graph (plasticity maintain)
 )
 
 // Note kinds.
@@ -271,7 +272,22 @@ type AddOptions struct {
 	Session string
 	// Force inserts even if a near-duplicate exists.
 	Force bool
+	// Supersedes are neurons the new one replaces; they are marked in the
+	// same transaction as the insert.
+	Supersedes []string
 }
+
+// SimilarNeuron is an existing neuron close to a new one, listed so that the
+// agent can mark it superseded or update it.
+type SimilarNeuron struct {
+	ID         string  `json:"id"`
+	Title      string  `json:"title"`
+	Similarity float64 `json:"similarity"`
+}
+
+// similarCos is the lowest embedding cosine at which an existing neuron is
+// listed as similar to a new one (up to DedupeCos, where it is a duplicate).
+const similarCos = 0.6
 
 // AddResult is the outcome of AddNodeChecked.
 type AddResult struct {
@@ -282,6 +298,10 @@ type AddResult struct {
 	Similarity   float64     `json:"similarity,omitempty"`
 	Reason       string      `json:"reason,omitempty"`
 	ContextLinks int         `json:"context_links"`
+	// Similar lists up to 3 existing neurons with cosine in [0.6, dedupe_cos)
+	// to the new one; Hint says what to do if one of them is outdated.
+	Similar []SimilarNeuron `json:"similar,omitempty"`
+	Hint    string          `json:"hint,omitempty"`
 }
 
 // AddNodeChecked adds a neuron after a duplicate check (same normalized
@@ -305,21 +325,78 @@ func (e *Engine) AddNodeChecked(n *model.Node, opt AddOptions) (*AddResult, erro
 			return res, nil
 		}
 	}
-	if err := e.insertNodes([]*model.Node{n}, []*nodeVector{vec}, nil); err != nil {
+	similar, err := e.similarNeurons(vec, 3)
+	if err != nil {
 		return nil, err
 	}
+	err = e.insertNodes([]*model.Node{n}, []*nodeVector{vec}, func(tx *store.Tx) error {
+		for _, old := range opt.Supersedes {
+			if err := supersede(tx, old, n.ID); err != nil {
+				return fmt.Errorf("--supersedes %s: %w", old, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range similar {
+		if !slices.Contains(opt.Supersedes, s.ID) {
+			res.Similar = append(res.Similar, s)
+		}
+	}
+	if len(res.Similar) > 0 {
+		res.Hint = fmt.Sprintf("If a similar neuron is now wrong or replaced, mark it: update ID --superseded-by %s. If it is still partly true, update its content instead.", n.ID)
+	}
 	if opt.Session != "" {
-		n, err := e.linkToSession(opt.Session, n.ID, RoleCreated)
+		n, err := e.linkToSession(opt.Session, n.ID, RoleCreated, true)
 		if err != nil {
 			return res, err
 		}
 		res.ContextLinks = n
 	}
-	e.Log(opt.Session, EventAdd, map[string]any{"id": n.ID, "type": n.Type, "title": n.Title, "context_links": res.ContextLinks})
+	e.Log(opt.Session, EventAdd, map[string]any{"id": n.ID, "type": n.Type, "title": n.Title, "context_links": res.ContextLinks,
+		"supersedes": opt.Supersedes, "similar": len(res.Similar)})
 	return res, nil
 }
 
 // findDuplicate looks for an existing neuron equivalent to n.
+// similarNeurons returns up to k existing neurons with embedding cosine in
+// [similarCos, DedupeCos) to vec, most similar first.
+func (e *Engine) similarNeurons(vec *nodeVector, k int) ([]SimilarNeuron, error) {
+	if vec == nil || e.emb == nil {
+		return nil, nil
+	}
+	v, err := embed.Decode(vec.blob)
+	if err != nil {
+		return nil, err
+	}
+	var out []SimilarNeuron
+	err = e.st.Read(func(tx *store.Tx) error {
+		hits, err := e.semanticSearch(tx, v, k+1, nil)
+		if err != nil {
+			return err
+		}
+		var ids []string
+		for _, h := range hits {
+			if h.cos >= similarCos && h.cos < e.P.DedupeCos {
+				ids = append(ids, h.id)
+			}
+		}
+		nodes, err := tx.GetNodes(ids)
+		if err != nil {
+			return err
+		}
+		for _, h := range hits {
+			if n := nodes[h.id]; n != nil && len(out) < k {
+				out = append(out, SimilarNeuron{ID: n.ID, Title: n.Title, Similarity: h.cos})
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
 func (e *Engine) findDuplicate(n *model.Node, vec *nodeVector) (*model.Node, float64, string, error) {
 	var dup *model.Node
 	var sim float64
@@ -384,11 +461,23 @@ func titlePattern(title string) string {
 
 // linkToSession links node to the session's most recent used/created
 // neurons, records it under role, and returns the number of links made.
+// With window, only neurons of the last ContextWindow prompts are linked (an
+// episode summarizes the whole session, a new neuron belongs to its task).
 // Existing links are kept as they are (their learned weights included).
-func (e *Engine) linkToSession(session, node, role string) (int, error) {
+func (e *Engine) linkToSession(session, node, role string, window bool) (int, error) {
 	var links []LinkSpec
 	err := e.st.Read(func(tx *store.Tx) error {
-		ctxIDs, err := tx.SessionNodes(session, RoleUsed, RoleCreated)
+		since := 0
+		if window && e.P.ContextWindow > 0 {
+			s, err := tx.GetSession(session)
+			if err != nil {
+				return err
+			}
+			if s != nil {
+				since = s.Prompts - e.P.ContextWindow
+			}
+		}
+		ctxIDs, err := tx.SessionNodesSince(session, since, RoleUsed, RoleCreated)
 		if err != nil {
 			return err
 		}
@@ -549,7 +638,7 @@ func (e *Engine) EndSession(session string, files []string, episode bool) (*Epis
 				}
 			}
 		}
-		if rep.Links, err = e.linkToSession(session, ep.ID, "episode"); err != nil {
+		if rep.Links, err = e.linkToSession(session, ep.ID, "episode", false); err != nil {
 			return nil, err
 		}
 		rep.Episode = ep

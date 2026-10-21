@@ -104,6 +104,9 @@ type Params struct {
 	// MinSeedStrength drops seeds whose strength (relative BM25 × query
 	// confidence) is below it; a query without a good match recalls nothing.
 	MinSeedStrength float64 `json:"min_seed_strength"`
+	// SupersededFactor scales the score of a superseded neuron in explicit
+	// recall (the prompt hook leaves superseded neurons out entirely).
+	SupersededFactor float64 `json:"superseded_factor"`
 	// HopDecay is δ, the per-hop attenuation.
 	HopDecay float64 `json:"hop_decay"`
 	// FiringThreshold is θ: a node is reached only if its activation ≥ θ.
@@ -138,10 +141,16 @@ type Params struct {
 	// --- Sessions (Claude Code plugin) ---
 
 	// ContextLinkWeight is the weight of the associative links a new neuron
-	// gets to the neurons its session used or created before it.
+	// gets to the neurons its session used or created before it. These links
+	// are tentative: below firing_threshold / hop_decay they carry no
+	// activation until co-use potentiates them (see Warnings).
 	ContextLinkWeight float64 `json:"context_link_weight"`
 	// ContextLinks caps how many recent session neurons a new one links to.
 	ContextLinks int `json:"context_links"`
+	// ContextWindow: a new neuron links only to session neurons used or
+	// created within the last ContextWindow user prompts (notifications do
+	// not count), i.e. to the same task. 0 = the whole session.
+	ContextWindow int `json:"context_window"`
 	// DedupeCos: adding a neuron whose embedding has at least this cosine to
 	// an existing one returns the existing one instead (unless forced).
 	DedupeCos float64 `json:"dedupe_cos"`
@@ -192,6 +201,7 @@ func DefaultParams() Params {
 		LexicalCosLow:      0.05,
 		LexicalCosHigh:     0.25,
 		EmbedMaxWords:      200,
+		SupersededFactor:   0.5,
 		HopDecay:           0.8,
 		FiringThreshold:    0.1,
 		FanK0:              8,
@@ -210,8 +220,9 @@ func DefaultParams() Params {
 		BM25Rationale: 1,
 		BM25Tags:      3,
 
-		ContextLinkWeight:        0.3,
+		ContextLinkWeight:        0.1,
 		ContextLinks:             10,
+		ContextWindow:            3,
 		DedupeCos:                0.9,
 		NudgeMinToolCalls:        5,
 		ConsolidateEverySessions: 10,
@@ -232,6 +243,7 @@ func (p Params) Validate() error {
 		"learn_min_confidence": p.LearnMinConfidence, "learn_min_activation": p.LearnMinActivation,
 		"vector_cos_low": p.VectorCosLow, "vector_cos_high": p.VectorCosHigh,
 		"lexical_cos_low": p.LexicalCosLow, "lexical_cos_high": p.LexicalCosHigh,
+		"superseded_factor": p.SupersededFactor,
 	}
 	for k, v := range in01 {
 		if v < 0 || v > 1 {
@@ -262,10 +274,20 @@ func (p Params) Validate() error {
 	}
 	if p.ReinforceTopK < 2 || p.SeedLimit < 1 || p.MaxNodes < 1 || p.MaxHops < 1 ||
 		p.EdgesPerNode < 1 || p.ResultLimit < 1 || p.MaxAccessRecords < 1 || p.TraceRetention < 1 || p.EmbedMaxWords < 1 ||
-		p.ContextLinks < 0 || p.MinEvidenceNodes < 0 || p.NudgeMinToolCalls < 0 || p.ConsolidateEverySessions < 1 {
+		p.ContextLinks < 0 || p.ContextWindow < 0 || p.MinEvidenceNodes < 0 || p.NudgeMinToolCalls < 0 || p.ConsolidateEverySessions < 1 {
 		return fmt.Errorf("integer limits must be positive (reinforce_top_k ≥ 2)")
 	}
 	return nil
+}
+
+// Warnings reports valid but questionable settings.
+func (p Params) Warnings() []string {
+	var w []string
+	if p.ContextLinkWeight*p.HopDecay >= p.FiringThreshold {
+		w = append(w, fmt.Sprintf("context_link_weight · hop_decay (%g) ≥ firing_threshold (%g): context links spread activation before co-use confirms them",
+			p.ContextLinkWeight*p.HopDecay, p.FiringThreshold))
+	}
+	return w
 }
 
 // ToMap renders params as key → string value.

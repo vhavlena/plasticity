@@ -245,3 +245,87 @@ func TestNotesAndParamChangesAreLogged(t *testing.T) {
 		t.Fatal("param changes not logged as expected")
 	}
 }
+
+// A new neuron links only to neurons of the session's last context_window
+// prompts, with tentative links that cannot spread activation.
+func TestContextLinksStayInTaskWindow(t *testing.T) {
+	f := newFixture(t)
+	if err := f.e.StartSession("S", "/repo", "startup"); err != nil {
+		t.Fatal(err)
+	}
+	prompt := func(n int) {
+		for i := 0; i < n; i++ {
+			if err := f.e.NotePrompt("S", "/repo", "next task"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	prompt(1)
+	if _, err := f.e.Used("S", []string{f.ids["sqlite"], f.ids["badger"]}); err != nil {
+		t.Fatal(err)
+	}
+	prompt(4) // prompt 5: sqlite and badger are 4 prompts old
+	if _, err := f.e.Used("S", []string{f.ids["hooks"]}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.e.AddNodeChecked(&model.Node{Type: model.TypeFact, Title: "Hook timeouts"}, AddOptions{Session: "S"})
+	if err != nil || res.ContextLinks != 1 {
+		t.Fatalf("only the current task is linked: %v %+v", err, res)
+	}
+	f.ids["new"] = res.Node.ID
+	if f.weight("new", "hooks") == 0 || f.weight("new", "sqlite") != 0 {
+		t.Fatal("links outside the window")
+	}
+	if w := f.weight("new", "hooks"); w*f.e.P.HopDecay >= f.e.P.FiringThreshold {
+		t.Fatalf("context link %g spreads activation", w)
+	}
+	// A neuron used again belongs to the current task again.
+	if _, err := f.e.Used("S", []string{f.ids["sqlite"]}); err != nil {
+		t.Fatal(err)
+	}
+	res, _ = f.e.AddNodeChecked(&model.Node{Type: model.TypeFact, Title: "WAL checkpoints"}, AddOptions{Session: "S"})
+	f.ids["new2"] = res.Node.ID
+	if f.weight("new2", "sqlite") == 0 || f.weight("new2", "badger") != 0 {
+		t.Fatalf("re-used neuron not in the window: %+v", res)
+	}
+	// context_window = 0 links the whole session.
+	if err := f.e.SetParam("context_window", "0"); err != nil {
+		t.Fatal(err)
+	}
+	res, _ = f.e.AddNodeChecked(&model.Node{Type: model.TypeFact, Title: "Session summary"}, AddOptions{Session: "S"})
+	if res.ContextLinks != 5 {
+		t.Fatalf("whole session: %+v", res)
+	}
+}
+
+// demote-unconfirmed lowers never co-used links of the old context weight
+// and leaves confirmed ones alone; a dry run changes nothing.
+func TestDemoteUnconfirmed(t *testing.T) {
+	f := newFixture(t)
+	if err := f.e.SetParam("context_link_weight", "0.3"); err != nil {
+		t.Fatal(err)
+	}
+	f.e.StartSession("S", "/repo", "startup")
+	if _, err := f.e.Used("S", []string{f.ids["sqlite"], f.ids["badger"]}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.e.AddNodeChecked(&model.Node{Type: model.TypeFact, Title: "Old context"}, AddOptions{Session: "S"})
+	if err != nil || res.ContextLinks != 2 {
+		t.Fatalf("%v %+v", err, res)
+	}
+	f.ids["new"] = res.Node.ID
+	confirmed := f.edge("sqlite", "badger").Weight
+	rep, err := f.e.DemoteUnconfirmed(0.3, 0.1, true)
+	if err != nil || rep.Demoted != 2 || f.edge("new", "sqlite").Weight != 0.3 {
+		t.Fatalf("dry run: %v %+v", err, rep)
+	}
+	if rep, err = f.e.DemoteUnconfirmed(0.3, 0.1, false); err != nil || rep.Demoted != 2 {
+		t.Fatalf("demote: %v %+v", err, rep)
+	}
+	if w := f.edge("new", "badger").Weight; w != 0.1 {
+		t.Fatalf("demoted weight %g", w)
+	}
+	if w := f.edge("sqlite", "badger").Weight; w != confirmed {
+		t.Fatalf("co-used link changed: %g -> %g", confirmed, w)
+	}
+}

@@ -182,7 +182,10 @@ func (e *Engine) Export(w io.Writer, format string) error {
 		return enc.Encode(map[string]any{"version": version.String(), "exported_at": now, "nodes": nodes, "edges": edges})
 	}
 	if format == "html" {
-		return viz.Write(w, map[string]any{"version": version.String(), "exported_at": now, "nodes": nodes, "edges": edges})
+		// An associative edge below firing_threshold / hop_decay cannot carry
+		// activation on its own; the page draws such tentative links dashed.
+		return viz.Write(w, map[string]any{"version": version.String(), "exported_at": now, "nodes": nodes, "edges": edges,
+			"propagation_weight": e.P.FiringThreshold / e.P.HopDecay})
 	}
 	return writeDOT(w, nodes, edges)
 }

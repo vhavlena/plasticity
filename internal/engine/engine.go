@@ -163,6 +163,8 @@ type NodePatch struct {
 	Tags       *[]string       `json:"tags,omitempty"`
 	Source     *string         `json:"source,omitempty"`
 	Importance *float64        `json:"importance,omitempty"`
+	// SupersededBy marks the neuron as replaced by another ("" clears it).
+	SupersededBy *string `json:"superseded_by,omitempty"`
 }
 
 // UpdateNode applies a patch.
@@ -197,9 +199,18 @@ func (e *Engine) UpdateNode(id string, p NodePatch) (*model.Node, error) {
 		if err := n.Validate(); err != nil {
 			return err
 		}
+		if p.SupersededBy != nil {
+			if err := supersede(tx, id, *p.SupersededBy); err != nil {
+				return err
+			}
+			n.SupersededBy = *p.SupersededBy
+		}
 		n.UpdatedAt = timestamp()
 		out = n
-		return tx.UpdateNode(n)
+		if err := tx.UpdateNode(n); err != nil {
+			return err
+		}
+		return fillSuccessorTitles(tx, n)
 	})
 	if err != nil {
 		return nil, err
@@ -267,6 +278,9 @@ func (e *Engine) GetNode(id string) (*NodeView, error) {
 		}
 		now, err := tx.Tick()
 		if err != nil {
+			return err
+		}
+		if err := fillSuccessorTitles(tx, n); err != nil {
 			return err
 		}
 		v = &NodeView{Node: n, Edges: []EdgeView{}}

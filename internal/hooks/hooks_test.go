@@ -433,3 +433,22 @@ func edgeWeight(t *testing.T, e *engine.Engine, a, b string) float64 {
 	t.Fatalf("no edge %s–%s", a, b)
 	return 0
 }
+
+// The prompt hook never injects a superseded neuron; its successor takes
+// its place and is marked as superseding it.
+func TestPromptNeverInjectsSuperseded(t *testing.T) {
+	e := newEngine(t)
+	old := add(t, e, "Fix the timeout regression with patch C", "patch C in the solver loop")
+	cur := add(t, e, "Fix the timeout regression with patch P", "patch P; patch C was refuted")
+	if _, err := e.UpdateNode(old, engine.NodePatch{SupersededBy: &cur}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := Prompt(e, Input{SessionID: "S", Prompt: "how do we fix the timeout regression with patch C?"}, "/repo", Config{RecallLimit: 5, ContextBudget: 3000})
+	if err != nil || out == nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	ctx := out.Specific.AdditionalContext
+	if strings.Contains(ctx, old) || !strings.Contains(ctx, cur) || !strings.Contains(ctx, "supersedes:") {
+		t.Fatalf("superseded neuron injected or successor unmarked:\n%s", ctx)
+	}
+}
