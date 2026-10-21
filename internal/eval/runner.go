@@ -10,6 +10,7 @@ import (
 
 	"github.com/vhavlena/plasticity/internal/embed"
 	"github.com/vhavlena/plasticity/internal/engine"
+	"github.com/vhavlena/plasticity/internal/hooks"
 	"github.com/vhavlena/plasticity/internal/model"
 )
 
@@ -26,10 +27,14 @@ const (
 	// LearnExplicit: after each recall, `reinforce` with all relevant nodes,
 	// as if Claude found the missing ones by other means (upper bound).
 	LearnExplicit = "explicit"
+	// LearnSession: as in real use: the session's recalls leave traces, and
+	// only the queries' scripted `used` reports (Query.Used) give feedback,
+	// against all recalls of the session since the previous report.
+	LearnSession = "session"
 )
 
 // LearnModes lists the valid modes.
-var LearnModes = []string{LearnNone, LearnReinforce, LearnFeedback, LearnExplicit}
+var LearnModes = []string{LearnNone, LearnReinforce, LearnFeedback, LearnExplicit, LearnSession}
 
 // Config is one evaluated configuration.
 type Config struct {
@@ -50,7 +55,9 @@ type QueryResult struct {
 	Session    int          `json:"session"`
 	Query      int          `json:"query"`
 	Text       string       `json:"q"`
-	Hits       []string     `json:"hits"` // node keys, best first
+	Source     string       `json:"source,omitempty"`
+	Skipped    bool         `json:"skipped,omitempty"` // filtered out by the prompt hook
+	Hits       []string     `json:"hits"`              // node keys, best first
 	Metrics    QueryMetrics `json:"metrics"`
 	Confidence float64      `json:"confidence"`
 	Traced     bool         `json:"traced"`
@@ -68,11 +75,16 @@ type GraphHealth struct {
 	Learned   int `json:"learned_edges"`
 	// Spurious learned edges connect nodes that are never relevant to the
 	// same query in the scenario.
-	Spurious      int     `json:"spurious_edges"`
-	SpuriousRate  float64 `json:"spurious_rate"`
-	MeanWeight    float64 `json:"mean_learned_weight"`
-	MaxDegree     int     `json:"max_learned_degree"`
-	PendingTraces int     `json:"pending_traces"`
+	Spurious     int     `json:"spurious_edges"`
+	SpuriousRate float64 `json:"spurious_rate"`
+	MeanWeight   float64 `json:"mean_learned_weight"`
+	MaxDegree    int     `json:"max_learned_degree"`
+	// CrossProject learned edges connect nodes of different projects.
+	CrossProject int `json:"cross_project_edges"`
+	// PreloadedWeight is the mean effective weight of the preloaded
+	// associative edges at the end (their scenario weight at the start).
+	PreloadedWeight float64 `json:"mean_preloaded_weight"`
+	PendingTraces   int     `json:"pending_traces"`
 }
 
 // Perf collects timings and sizes.
@@ -145,8 +157,12 @@ func Run(s *Scenario, cfg Config, dir string) (*Result, error) {
 	res.Perf.LoadMS = ms(time.Since(t0))
 
 	nodeTerms := make(map[string]map[string]bool, len(s.Nodes))
+	project := make(map[string]string, len(s.Nodes))
+	byKey := make(map[string]ScenarioNode, len(s.Nodes))
 	for _, n := range s.Nodes {
 		nodeTerms[n.Key] = terms(n.Title + " " + n.Content + " " + n.Rationale + " " + strings.Join(n.Tags, " "))
+		project[n.Key] = n.Project
+		byKey[n.Key] = n
 	}
 
 	var recallT, learnT, consT []time.Duration
@@ -161,41 +177,52 @@ func Run(s *Scenario, cfg Config, dir string) (*Result, error) {
 		var passResults []QueryResult
 		for si, sess := range s.Sessions {
 			sessionID := fmt.Sprintf("p%d-s%d", pass, si)
+			if err := e.StartSession(sessionID, sess.Project, "eval"); err != nil {
+				return nil, err
+			}
 			for qi, q := range sess.Queries {
 				// The session decides which traces learning sees: per session for
-				// reinforce, per recall for feedback; none and explicit store no
-				// traces (explicit learns from the labels directly).
+				// reinforce and session, per recall for feedback; none and
+				// explicit store no traces (explicit learns from the labels).
 				sid := ""
 				switch cfg.Learn {
-				case LearnReinforce:
+				case LearnReinforce, LearnSession:
 					sid = sessionID
 				case LearnFeedback:
 					sid = fmt.Sprintf("%s-q%d", sessionID, qi)
 				}
-				t := time.Now()
-				r, err := e.Recall(engine.RecallRequest{Query: q.Q, Session: sid, Limit: cfg.K})
-				d := time.Since(t)
-				if err != nil {
-					return nil, fmt.Errorf("pass %d session %d query %d: %w", pass, si, qi, err)
+				qr := QueryResult{Pass: pass, Session: si, Query: qi, Text: q.Q, Source: q.Source, Hits: []string{}}
+				// Prompts and notifications go through the prompt hook's filter.
+				if (q.Source == SourcePrompt || q.Source == SourceNotification) && hooks.SkipsRecall(q.Q) {
+					qr.Skipped = true
+				} else {
+					t := time.Now()
+					r, err := e.Recall(engine.RecallRequest{Query: q.Q, Session: sid, Limit: cfg.K})
+					d := time.Since(t)
+					if err != nil {
+						return nil, fmt.Errorf("pass %d session %d query %d: %w", pass, si, qi, err)
+					}
+					recallT = append(recallT, d)
+					for _, h := range r.Hits {
+						qr.Hits = append(qr.Hits, keyOf[h.Node.ID])
+					}
+					qr.Confidence, qr.Traced, qr.LatencyMS = r.Confidence, r.RecallID != "", ms(d)
 				}
-				recallT = append(recallT, d)
-				hits := make([]string, len(r.Hits))
-				for i, h := range r.Hits {
-					hits[i] = keyOf[h.Node.ID]
-				}
-				qr := QueryResult{
-					Pass: pass, Session: si, Query: qi, Text: q.Q, Hits: hits,
-					Metrics:    score(hits, q.Relevant, associative(q.Q, q.Relevant, nodeTerms)),
-					Confidence: r.Confidence, Traced: r.RecallID != "", LatencyMS: ms(d),
-				}
+				qr.Metrics = score(qr.Hits, q.Relevant, associative(q.Q, q.Relevant, nodeTerms))
+				qr.Metrics.noise(qr.Hits, q, sess.Project, project)
 				passResults = append(passResults, qr)
 
-				t = time.Now()
-				if err := learnAfterQuery(e, cfg.Learn, sid, q, hits, idOf); err != nil {
+				t := time.Now()
+				if err := learnAfterQuery(e, cfg.Learn, sid, q, qr.Hits, idOf); err != nil {
 					return nil, err
 				}
-				if cfg.Learn == LearnFeedback || cfg.Learn == LearnExplicit {
+				if cfg.Learn == LearnFeedback || cfg.Learn == LearnExplicit || cfg.Learn == LearnSession {
 					learnT = append(learnT, time.Since(t))
+				}
+				for _, k := range q.Add {
+					if err := addDuring(e, byKey[k], sessionID, idOf, keyOf); err != nil {
+						return nil, fmt.Errorf("pass %d session %d query %d: add %q: %w", pass, si, qi, k, err)
+					}
 				}
 			}
 			if cfg.Learn == LearnReinforce {
@@ -233,23 +260,33 @@ func Run(s *Scenario, cfg Config, dir string) (*Result, error) {
 			res.Warnings = append(res.Warnings, w)
 		}
 	}
-	res.Graph, err = graphHealth(e, s, keyOf)
+	res.Graph, err = graphHealth(e, s, keyOf, project)
 	return res, err
 }
 
-// load inserts the scenario's nodes and links, returning key↔ID maps.
+func newNode(n ScenarioNode) *model.Node {
+	return &model.Node{Type: n.Type, Title: n.Title, Content: n.Content, Rationale: n.Rationale,
+		Tags: n.Tags, Importance: n.Importance, Source: "eval"}
+}
+
+// load inserts the scenario's nodes (except those added during sessions)
+// and links, returning key↔ID maps.
 func load(e *engine.Engine, s *Scenario) (idOf, keyOf map[string]string, err error) {
-	nodes := make([]*model.Node, len(s.Nodes))
-	for i, n := range s.Nodes {
-		nodes[i] = &model.Node{Type: n.Type, Title: n.Title, Content: n.Content, Rationale: n.Rationale,
-			Tags: n.Tags, Importance: n.Importance, Source: "eval"}
+	deferred := s.deferred()
+	var nodes []*model.Node
+	var keys []string
+	for _, n := range s.Nodes {
+		if !deferred[n.Key] {
+			nodes = append(nodes, newNode(n))
+			keys = append(keys, n.Key)
+		}
 	}
 	if err := e.AddNodes(nodes); err != nil {
 		return nil, nil, err
 	}
-	idOf, keyOf = make(map[string]string, len(nodes)), make(map[string]string, len(nodes))
+	idOf, keyOf = make(map[string]string, len(s.Nodes)), make(map[string]string, len(s.Nodes))
 	for i, n := range nodes {
-		idOf[s.Nodes[i].Key], keyOf[n.ID] = n.ID, s.Nodes[i].Key
+		idOf[keys[i]], keyOf[n.ID] = n.ID, keys[i]
 	}
 	links := make([]engine.LinkSpec, len(s.Links))
 	for i, l := range s.Links {
@@ -258,25 +295,51 @@ func load(e *engine.Engine, s *Scenario) (idOf, keyOf map[string]string, err err
 	return idOf, keyOf, e.AddLinks(links)
 }
 
-// learnAfterQuery applies per-recall learning for the feedback and explicit
-// modes.
+// addDuring stores a node during a session the way `plasticity add
+// --session` does, so it gets the engine's add-time context links. On a
+// later pass the node already exists and is left alone.
+func addDuring(e *engine.Engine, n ScenarioNode, session string, idOf, keyOf map[string]string) error {
+	if idOf[n.Key] != "" {
+		return nil
+	}
+	res, err := e.AddNodeChecked(newNode(n), engine.AddOptions{Session: session, Force: true})
+	if err != nil {
+		return err
+	}
+	idOf[n.Key], keyOf[res.Node.ID] = res.Node.ID, n.Key
+	return nil
+}
+
+// learnAfterQuery applies per-recall learning for the feedback, explicit
+// and session modes.
 func learnAfterQuery(e *engine.Engine, mode, session string, q Query, hits []string, idOf map[string]string) error {
 	switch mode {
 	case LearnFeedback:
-		rel := map[string]bool{}
-		for _, r := range q.Relevant {
-			rel[r] = true
-		}
 		var used []string
-		for _, h := range hits {
-			if rel[h] {
-				used = append(used, idOf[h])
+		if len(q.Used) > 0 {
+			used = existing(q.Used, idOf)
+		} else {
+			rel := map[string]bool{}
+			for _, r := range q.Relevant {
+				rel[r] = true
+			}
+			for _, h := range hits {
+				if rel[h] {
+					used = append(used, idOf[h])
+				}
 			}
 		}
 		if len(used) == 0 {
 			return nil // nothing useful was recalled: nothing to report
 		}
 		_, err := e.Feedback(session, used)
+		return err
+	case LearnSession:
+		used := existing(q.Used, idOf)
+		if len(used) == 0 {
+			return nil
+		}
+		_, err := e.Used(session, used)
 		return err
 	case LearnExplicit:
 		if len(q.Relevant) < 2 {
@@ -292,8 +355,19 @@ func learnAfterQuery(e *engine.Engine, mode, session string, q Query, hits []str
 	return nil
 }
 
+// existing maps keys to IDs, leaving out nodes not yet added.
+func existing(keys []string, idOf map[string]string) []string {
+	var ids []string
+	for _, k := range keys {
+		if id := idOf[k]; id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 // graphHealth inspects the final graph.
-func graphHealth(e *engine.Engine, s *Scenario, keyOf map[string]string) (GraphHealth, error) {
+func graphHealth(e *engine.Engine, s *Scenario, keyOf, project map[string]string) (GraphHealth, error) {
 	var g GraphHealth
 	st, err := e.Stats()
 	if err != nil {
@@ -321,23 +395,31 @@ func graphHealth(e *engine.Engine, s *Scenario, keyOf map[string]string) (GraphH
 		}
 	}
 	degree := map[string]int{}
-	sum := 0.0
+	sum, preSum := 0.0, 0.0
 	for _, ed := range edges {
 		if ed.Kind.Typed() {
 			g.Typed++
 			continue
 		}
-		if preloaded[[2]string{keyOf[ed.Src], keyOf[ed.Dst]}] {
+		a, b := keyOf[ed.Src], keyOf[ed.Dst]
+		if preloaded[[2]string{a, b}] {
 			g.Preloaded++
+			preSum += ed.EffectiveWeight
 			continue
 		}
 		g.Learned++
 		sum += ed.EffectiveWeight
 		degree[ed.Src]++
 		degree[ed.Dst]++
-		if !coRelevant[[2]string{keyOf[ed.Src], keyOf[ed.Dst]}] {
+		if !coRelevant[[2]string{a, b}] {
 			g.Spurious++
 		}
+		if project[a] != "" && project[b] != "" && project[a] != project[b] {
+			g.CrossProject++
+		}
+	}
+	if g.Preloaded > 0 {
+		g.PreloadedWeight = preSum / float64(g.Preloaded)
 	}
 	if g.Learned > 0 {
 		g.MeanWeight = sum / float64(g.Learned)

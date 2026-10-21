@@ -150,3 +150,57 @@ func TestScenarioValidationAndRoundTrip(t *testing.T) {
 		t.Fatalf("round trip: %v", err)
 	}
 }
+
+// Noise metrics, the prompt-hook filter, mid-session adds with context links
+// and scripted used reports (the session learning mode).
+func TestNoiseStaleAndSessionMode(t *testing.T) {
+	s := &Scenario{Name: "noise",
+		Nodes: []ScenarioNode{
+			{Key: "connect", Type: "procedure", Title: "Connect to the benchmark server", Content: "ssh to the server", Project: "solver"},
+			{Key: "progress", Type: "procedure", Title: "Check benchmark progress on the server", Content: "tail the run log", Project: "solver"},
+			{Key: "other", Type: "procedure", Title: "Run policy benchmarks on the server", Content: "screen job", Project: "policy"},
+			{Key: "old", Type: "decision", Title: "Fix for the timeout regression: patch C", Importance: 0.9, Project: "solver"},
+			{Key: "new", Type: "decision", Title: "Fix for the timeout regression: patch P", Importance: 0.9, Project: "solver"},
+			{Key: "tip", Type: "fact", Title: "Read issues with gh api", Project: "solver"},
+		},
+		Sessions: []Session{{Project: "solver", Queries: []Query{
+			{Q: "is the benchmark on the server still running?", Relevant: []string{"progress", "connect"}, Used: []string{"connect"}},
+			{Q: "ok", Source: SourcePrompt},                                             // skipped by the prompt hook
+			{Q: "<task-notification> server log tail done", Source: SourceNotification}, // unlabeled
+			{Q: "fix for the timeout regression", Relevant: []string{"new"}, Stale: []string{"old"}, Add: []string{"tip"}},
+		}}},
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Run(s, Config{Name: "session", Learn: LearnSession, K: 6}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := r.Queries
+	if !q[1].Skipped || len(q[1].Hits) != 0 || q[2].Skipped || !q[2].Metrics.Unlabeled {
+		t.Fatalf("filter/unlabeled: %+v %+v", q[1], q[2])
+	}
+	if q[0].Metrics.CrossProject == 0 || q[0].Metrics.Irrelevant < q[0].Metrics.CrossProject {
+		t.Fatalf("the policy server procedure should count as cross-project noise: %+v", q[0])
+	}
+	if q[3].Metrics.StaleLabels != 1 || q[3].Metrics.StaleHits != 1 {
+		t.Fatalf("stale: %+v", q[3])
+	}
+	a := r.Passes[0]
+	if a.Labeled != 2 || a.StaleQueries != 1 || a.StaleRate != 1 || !near(a.SkippedRate, 0.25) {
+		t.Fatalf("aggregate: %+v", a)
+	}
+	// Unlabeled: the skipped "ok" (no hits) and the notification.
+	if want := map[bool]float64{true: 0.5, false: 0}[len(q[2].Hits) > 0]; a.NoiseRate != want {
+		t.Fatalf("noise rate %g, want %g", a.NoiseRate, want)
+	}
+	// "tip" was stored after the last query, linked to the used "connect".
+	if r.Graph.Nodes != 6 || r.Graph.Learned == 0 || r.Graph.Spurious == 0 {
+		t.Fatalf("mid-session add must create (spurious) context links: %+v", r.Graph)
+	}
+	bad := &Scenario{Nodes: s.Nodes, Sessions: []Session{{Queries: []Query{{Q: "x", Add: []string{"tip", "tip"}}}}}}
+	if err := bad.Validate(); err == nil {
+		t.Fatal("double add accepted")
+	}
+}

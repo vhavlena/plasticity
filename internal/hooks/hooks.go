@@ -193,9 +193,10 @@ func CloseAbandoned(e *engine.Engine, cfg Config, limit int) (int, error) {
 	return closed, nil
 }
 
-// trivial reports prompts that need no recall: slash commands and very
-// short inputs (acknowledgements).
-func trivial(prompt string) bool {
+// SkipsRecall reports prompts that need no recall: slash commands and very
+// short inputs (acknowledgements). The eval runner applies it to simulated
+// prompts, so scenarios see the same filter as the prompt hook.
+func SkipsRecall(prompt string) bool {
 	p := strings.TrimSpace(prompt)
 	return strings.HasPrefix(p, "/") || len(strings.Fields(p)) < 3
 }
@@ -205,7 +206,7 @@ func Prompt(e *engine.Engine, in Input, project string, cfg Config) (*Output, er
 	if err := e.NotePrompt(in.SessionID, project, in.Prompt); err != nil {
 		return nil, err
 	}
-	if trivial(in.Prompt) {
+	if SkipsRecall(in.Prompt) {
 		return nil, nil
 	}
 	start := time.Now()

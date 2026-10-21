@@ -39,13 +39,38 @@ func (r *Report) WriteText(w io.Writer) error {
 		return err
 	}
 
+	fmt.Fprintln(w, "\nnoise (noise: unlabeled queries that recalled anything; stale: queries recalling a superseded node, first: above the current one)")
+	tw = tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
+	fmt.Fprintln(tw, "config\tpass\thits/q\tirrelevant\tcross-project\tnoise\tstale\tstale-first\tskipped\t")
+	for _, res := range r.Results {
+		for i, a := range res.Passes {
+			name := res.Config
+			if i > 0 {
+				name = ""
+			}
+			noise, stale, staleFirst := "-", "-", "-"
+			if a.Queries > a.Labeled {
+				noise = pct(a.NoiseRate)
+			}
+			if a.StaleQueries > 0 {
+				stale, staleFirst = pct(a.StaleRate), pct(a.StaleFirstRate)
+			}
+			fmt.Fprintf(tw, "%s\t%d\t%.1f\t%s\t%s\t%s\t%s\t%s\t%s\t\n", name, i+1, a.HitsPerRecall,
+				pct(a.IrrelevantShare), pct(a.CrossProjectShare), noise, stale, staleFirst, pct(a.SkippedRate))
+		}
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+
 	fmt.Fprintln(w, "\ngraph after run")
 	tw = tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(tw, "config\tlearned\tspurious\tmean-w\tmax-deg\ttyped\tpreloaded\tdormant\tpending\t")
+	fmt.Fprintln(tw, "config\tlearned\tspurious\tcross-project\tmean-w\tmax-deg\ttyped\tpreloaded\tpreloaded-w\tdormant\tpending\t")
 	for _, res := range r.Results {
 		g := res.Graph
-		fmt.Fprintf(tw, "%s\t%d\t%d (%s)\t%.3f\t%d\t%d\t%d\t%d\t%d\t\n", res.Config, g.Learned, g.Spurious,
-			pct(g.SpuriousRate), g.MeanWeight, g.MaxDegree, g.Typed, g.Preloaded, g.Dormant, g.PendingTraces)
+		fmt.Fprintf(tw, "%s\t%d\t%d (%s)\t%d\t%.3f\t%d\t%d\t%d\t%.3f\t%d\t%d\t\n", res.Config, g.Learned, g.Spurious,
+			pct(g.SpuriousRate), g.CrossProject, g.MeanWeight, g.MaxDegree, g.Typed, g.Preloaded, g.PreloadedWeight,
+			g.Dormant, g.PendingTraces)
 	}
 	if err := tw.Flush(); err != nil {
 		return err

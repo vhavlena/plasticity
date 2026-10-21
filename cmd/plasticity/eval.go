@@ -51,10 +51,16 @@ learning modes:
   reinforce  'reinforce --session' at the end of each session (unsupervised)
   feedback   after each recall, 'feedback' with the relevant nodes that were recalled
   explicit   after each recall, 'reinforce' with all relevant nodes (upper bound)
+  session    as in real use: traces per session, feedback only from the queries'
+             scripted "used" reports (with nodes stored mid-session via "add")
 
 Metrics: recall/precision/MRR/nDCG of the top-k against the labels, and
 assoc-recall: the share of relevant nodes sharing no word with the query that
-were retrieved (only links, learning or embeddings can find those).`,
+were retrieved (only links, learning or embeddings can find those).
+Noise: hits outside the labels, hits from another project than the session's,
+unlabeled queries (nothing should be recalled) that recalled anything, and
+queries recalling nodes labeled stale (superseded). Queries with source
+"prompt" or "notification" pass the prompt hook's filter first.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, err := eval.Load(args[0])
