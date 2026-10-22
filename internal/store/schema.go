@@ -146,4 +146,45 @@ CREATE INDEX events_kind ON events(kind, id);
 `,
 	// prune_threshold was retired when pruning was replaced by weight floors.
 	`DELETE FROM params WHERE key = 'prune_threshold';`,
+	// prompt_no: the session's prompt count when the neuron was last used or
+	// created there; new neurons link only to the session's recent ones.
+	`ALTER TABLE session_nodes ADD COLUMN prompt_no INTEGER NOT NULL DEFAULT 0;`,
+	// superseded_by: the neuron that replaces this one ('' if current).
+	`ALTER TABLE nodes ADD COLUMN superseded_by TEXT NOT NULL DEFAULT '';`,
+	// node_projects: the projects a neuron was created in or used in (uses =
+	// sessions that reported it used), for project affinity. Backfilled from
+	// the session history.
+	`
+CREATE TABLE node_projects (
+	node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+	project TEXT NOT NULL,
+	created INTEGER NOT NULL DEFAULT 0,
+	uses    INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (node_id, project)
+);
+INSERT INTO node_projects (node_id, project, created, uses)
+	SELECT sn.node_id, s.project, max(sn.role = 'created'), sum(sn.role = 'used')
+	FROM session_nodes sn JOIN sessions s ON s.id = sn.session JOIN nodes n ON n.id = sn.node_id
+	WHERE s.project <> '' AND sn.role IN ('created', 'used')
+	GROUP BY sn.node_id, s.project;
+`,
+	// node_access.weight: accesses are weighted (a use or creation 1, a
+	// recall hit recall_access_weight); creation now counts as an access,
+	// backfilled for existing neurons.
+	`
+ALTER TABLE node_access ADD COLUMN weight REAL NOT NULL DEFAULT 1;
+INSERT INTO node_access (node_id, tick, weight) SELECT id, created_tick, 1 FROM nodes;
+`,
+	// node_projects rebuilt from the session history: a database migrated
+	// by a newer binary but then used by an older one (which records
+	// sessions but does not keep node_projects) has stale rows. The rebuild
+	// yields exactly what AddSessionNodes would have recorded.
+	`
+DELETE FROM node_projects;
+INSERT INTO node_projects (node_id, project, created, uses)
+	SELECT sn.node_id, s.project, max(sn.role = 'created'), sum(sn.role = 'used')
+	FROM session_nodes sn JOIN sessions s ON s.id = sn.session JOIN nodes n ON n.id = sn.node_id
+	WHERE s.project <> '' AND sn.role IN ('created', 'used')
+	GROUP BY sn.node_id, s.project;
+`,
 }

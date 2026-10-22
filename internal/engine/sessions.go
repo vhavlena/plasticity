@@ -25,6 +25,9 @@ const (
 const (
 	EventSessionStart = "session_start"
 	EventPrompt       = "prompt"
+	// EventNotification is a task notification delivered as a prompt; it is
+	// not counted as a prompt of the session.
+	EventNotification = "notification"
 	EventRecall       = "recall"
 	EventUsed         = "used"
 	EventAdd          = "add"
@@ -32,8 +35,9 @@ const (
 	EventEpisode      = "episode"
 	EventConsolidate  = "consolidate"
 	EventError        = "error"
-	EventParam        = "param" // a parameter or the embedder changed
-	EventNote         = "note"  // the user's observation (plasticity note)
+	EventParam        = "param"    // a parameter or the embedder changed
+	EventNote         = "note"     // the user's observation (plasticity note)
+	EventMaintain     = "maintain" // a one-off repair of the graph (plasticity maintain)
 )
 
 // Note kinds.
@@ -64,6 +68,9 @@ func (e *Engine) Note(session, kind, text string, ids []string) error {
 const (
 	RecallSourcePrompt = "prompt" // automatic recall for a user prompt (hook)
 	RecallSourceClaude = "claude" // recall Claude ran itself during a session
+	// RecallSourceNotification: automatic recall for a failed background
+	// task's notification (hook).
+	RecallSourceNotification = "notification"
 )
 
 // LogRecall logs a recall of a session: its source, query, hits and
@@ -77,7 +84,7 @@ func (e *Engine) LogRecall(session, source, query string, r *RecallResult, laten
 		"source": source, "query": truncate(query, 500), "hits": hits, "confidence": r.Confidence,
 		"lexical": r.LexicalConfidence, "semantic": r.SemanticConfidence, "seeds": r.Seeds,
 		"latency_ms": float64(latency) / float64(time.Millisecond), "injected_chars": injectedChars,
-		"recall_id": r.RecallID, "trace_skipped": r.TraceSkipped,
+		"recall_id": r.RecallID, "trace_skipped": r.TraceSkipped, "suppressed": r.Suppressed,
 	})
 }
 
@@ -216,6 +223,17 @@ func (e *Engine) NotePrompt(id, project, prompt string) error {
 	return nil
 }
 
+// NoteNotification records a task notification delivered to a session as a
+// prompt. Unlike NotePrompt it neither counts as a prompt nor becomes the
+// session's first prompt.
+func (e *Engine) NoteNotification(id, project, text string) error {
+	if err := e.st.Write(func(tx *store.Tx) error { return tx.TouchSession(id, project, timestamp()) }); err != nil {
+		return err
+	}
+	e.Log(id, EventNotification, map[string]string{"text": truncate(text, 2000)})
+	return nil
+}
+
 // Used records that Claude used these neurons together. Within a session it
 // is feedback (LTP among the used neurons, LTD towards neurons recalled in
 // the session but not used); without a session it is plain reinforcement.
@@ -254,7 +272,22 @@ type AddOptions struct {
 	Session string
 	// Force inserts even if a near-duplicate exists.
 	Force bool
+	// Supersedes are neurons the new one replaces; they are marked in the
+	// same transaction as the insert.
+	Supersedes []string
 }
+
+// SimilarNeuron is an existing neuron close to a new one, listed so that the
+// agent can mark it superseded or update it.
+type SimilarNeuron struct {
+	ID         string  `json:"id"`
+	Title      string  `json:"title"`
+	Similarity float64 `json:"similarity"`
+}
+
+// similarCos is the lowest embedding cosine at which an existing neuron is
+// listed as similar to a new one (up to DedupeCos, where it is a duplicate).
+const similarCos = 0.6
 
 // AddResult is the outcome of AddNodeChecked.
 type AddResult struct {
@@ -265,6 +298,12 @@ type AddResult struct {
 	Similarity   float64     `json:"similarity,omitempty"`
 	Reason       string      `json:"reason,omitempty"`
 	ContextLinks int         `json:"context_links"`
+	// Similar lists up to 3 existing neurons with cosine in [0.6, dedupe_cos)
+	// to the new one; Hint says what to do if one of them is outdated.
+	Similar []SimilarNeuron `json:"similar,omitempty"`
+	Hint    string          `json:"hint,omitempty"`
+	// Warning flags a questionable add, e.g. one without an importance.
+	Warning string `json:"warning,omitempty"`
 }
 
 // AddNodeChecked adds a neuron after a duplicate check (same normalized
@@ -278,7 +317,9 @@ func (e *Engine) AddNodeChecked(n *model.Node, opt AddOptions) (*AddResult, erro
 	vec := e.embedNode(ctx, n)
 	res := &AddResult{Node: n}
 	if !opt.Force {
-		dup, sim, reason, err := e.findDuplicate(n, vec)
+		// The neurons it supersedes are expected to be near-duplicates (a
+		// corrected version of the same note); they are not duplicates.
+		dup, sim, reason, err := e.findDuplicate(n, vec, opt.Supersedes)
 		if err != nil {
 			return nil, err
 		}
@@ -288,28 +329,85 @@ func (e *Engine) AddNodeChecked(n *model.Node, opt AddOptions) (*AddResult, erro
 			return res, nil
 		}
 	}
-	if err := e.insertNodes([]*model.Node{n}, []*nodeVector{vec}, nil); err != nil {
+	similar, err := e.similarNeurons(vec, 3)
+	if err != nil {
 		return nil, err
 	}
+	err = e.insertNodes([]*model.Node{n}, []*nodeVector{vec}, func(tx *store.Tx) error {
+		for _, old := range opt.Supersedes {
+			if err := supersede(tx, old, n.ID); err != nil {
+				return fmt.Errorf("--supersedes %s: %w", old, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range similar {
+		if !slices.Contains(opt.Supersedes, s.ID) {
+			res.Similar = append(res.Similar, s)
+		}
+	}
+	if len(res.Similar) > 0 {
+		res.Hint = fmt.Sprintf("If a similar neuron is now wrong or replaced, mark it: update ID --superseded-by %s. If it is still partly true, update its content instead.", n.ID)
+	}
 	if opt.Session != "" {
-		n, err := e.linkToSession(opt.Session, n.ID, RoleCreated)
+		n, err := e.linkToSession(opt.Session, n.ID, RoleCreated, true)
 		if err != nil {
 			return res, err
 		}
 		res.ContextLinks = n
 	}
-	e.Log(opt.Session, EventAdd, map[string]any{"id": n.ID, "type": n.Type, "title": n.Title, "context_links": res.ContextLinks})
+	e.Log(opt.Session, EventAdd, map[string]any{"id": n.ID, "type": n.Type, "title": n.Title, "context_links": res.ContextLinks,
+		"supersedes": opt.Supersedes, "similar": len(res.Similar)})
 	return res, nil
 }
 
 // findDuplicate looks for an existing neuron equivalent to n.
-func (e *Engine) findDuplicate(n *model.Node, vec *nodeVector) (*model.Node, float64, string, error) {
+// similarNeurons returns up to k existing neurons with embedding cosine in
+// [similarCos, DedupeCos) to vec, most similar first.
+func (e *Engine) similarNeurons(vec *nodeVector, k int) ([]SimilarNeuron, error) {
+	if vec == nil || e.emb == nil {
+		return nil, nil
+	}
+	v, err := embed.Decode(vec.blob)
+	if err != nil {
+		return nil, err
+	}
+	var out []SimilarNeuron
+	err = e.st.Read(func(tx *store.Tx) error {
+		hits, err := e.semanticSearch(tx, v, k+1, nil)
+		if err != nil {
+			return err
+		}
+		var ids []string
+		for _, h := range hits {
+			if h.cos >= similarCos && h.cos < e.P.DedupeCos {
+				ids = append(ids, h.id)
+			}
+		}
+		nodes, err := tx.GetNodes(ids)
+		if err != nil {
+			return err
+		}
+		for _, h := range hits {
+			if n := nodes[h.id]; n != nil && len(out) < k {
+				out = append(out, SimilarNeuron{ID: n.ID, Title: n.Title, Similarity: h.cos})
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
+func (e *Engine) findDuplicate(n *model.Node, vec *nodeVector, except []string) (*model.Node, float64, string, error) {
 	var dup *model.Node
 	var sim float64
 	var reason string
 	err := e.st.Read(func(tx *store.Tx) error {
-		same, err := tx.FindTitle(titlePattern(n.Title), func(title string) bool {
-			return normTitle(title) == normTitle(n.Title)
+		same, err := tx.FindTitle(titlePattern(n.Title), func(m *model.Node) bool {
+			return normTitle(m.Title) == normTitle(n.Title) && !slices.Contains(except, m.ID)
 		})
 		if err != nil {
 			return err
@@ -325,14 +423,23 @@ func (e *Engine) findDuplicate(n *model.Node, vec *nodeVector) (*model.Node, flo
 		if err != nil {
 			return err
 		}
-		best, err := e.semanticSearch(tx, v, 1)
-		if err != nil || len(best) == 0 || best[0].cos < e.P.DedupeCos {
+		hits, err := e.semanticSearch(tx, v, 1+len(except), nil)
+		if err != nil {
 			return err
 		}
-		if dup, err = tx.GetNode(best[0].id); err != nil {
-			return err
+		for _, h := range hits {
+			if slices.Contains(except, h.id) {
+				continue
+			}
+			if h.cos < e.P.DedupeCos {
+				return nil
+			}
+			if dup, err = tx.GetNode(h.id); err != nil {
+				return err
+			}
+			sim, reason = h.cos, "similar embedding"
+			return nil
 		}
-		sim, reason = best[0].cos, "similar embedding"
 		return nil
 	})
 	return dup, sim, reason, err
@@ -365,13 +472,33 @@ func titlePattern(title string) string {
 	return b.String()
 }
 
+// NoteNodeProject records that a neuron was created in project and/or used
+// there uses more times (sessions normally record this themselves; this is
+// for imports and evaluation).
+func (e *Engine) NoteNodeProject(id, project string, created bool, uses int) error {
+	return e.st.Write(func(tx *store.Tx) error { return tx.AddNodeProject(id, project, created, uses) })
+}
+
 // linkToSession links node to the session's most recent used/created
 // neurons, records it under role, and returns the number of links made.
+// With window, only neurons of the current prompt and the ContextWindow
+// prompts before it are linked (an
+// episode summarizes the whole session, a new neuron belongs to its task).
 // Existing links are kept as they are (their learned weights included).
-func (e *Engine) linkToSession(session, node, role string) (int, error) {
+func (e *Engine) linkToSession(session, node, role string, window bool) (int, error) {
 	var links []LinkSpec
 	err := e.st.Read(func(tx *store.Tx) error {
-		ctxIDs, err := tx.SessionNodes(session, RoleUsed, RoleCreated)
+		since := 0
+		if window && e.P.ContextWindow > 0 {
+			s, err := tx.GetSession(session)
+			if err != nil {
+				return err
+			}
+			if s != nil {
+				since = s.Prompts - e.P.ContextWindow
+			}
+		}
+		ctxIDs, err := tx.SessionNodesSince(session, since, RoleUsed, RoleCreated)
 		if err != nil {
 			return err
 		}
@@ -532,7 +659,7 @@ func (e *Engine) EndSession(session string, files []string, episode bool) (*Epis
 				}
 			}
 		}
-		if rep.Links, err = e.linkToSession(session, ep.ID, "episode"); err != nil {
+		if rep.Links, err = e.linkToSession(session, ep.ID, "episode", false); err != nil {
 			return nil, err
 		}
 		rep.Episode = ep

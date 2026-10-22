@@ -16,6 +16,18 @@ type Params struct {
 	LearningRate float64 `json:"learning_rate"`
 	// DepressionRate is η_d in Δw = −η_d·a_i·a_j·w (anti-Hebbian feedback).
 	DepressionRate float64 `json:"depression_rate"`
+	// LTDAllLinks selects which links feedback weakens for a recalled but
+	// unused neuron: 0 (default) only the last hop of the path that
+	// activated it (none if it was a seed), at full rate if that path
+	// contains a used neuron and at LTDIndirectFactor otherwise; 1 every
+	// link between it and a used neuron (the behavior before 0.5).
+	LTDAllLinks       int     `json:"ltd_all_links"`
+	LTDIndirectFactor float64 `json:"ltd_indirect_factor"`
+	// RecallAccessWeight is the ACT-R access weight of a recall hit (a use or
+	// a creation weighs 1). Only hits of recalls with confidence ≥
+	// learn_min_confidence that are not foreign to the recall's project
+	// record an access, and only they fire.
+	RecallAccessWeight float64 `json:"recall_access_weight"`
 	// LearnMinConfidence: a recall stores a trace for Hebbian learning only
 	// if its query confidence is at least this.
 	LearnMinConfidence float64 `json:"learn_min_confidence"`
@@ -76,16 +88,48 @@ type Params struct {
 	// the graph when computing query confidence (0 = ignore unknown words,
 	// 1 = treat them as fully unexplained query content).
 	AbsentTermWeight float64 `json:"absent_term_weight"`
+	// MinMatchedIDFShare: a lexical hit seeds only if the rarest term it
+	// matched has IDF ≥ share · idf(N, max(1, N/10)), i.e. the hit matched a term
+	// about as rare as one occurring in 10% of the neurons. Generic words
+	// ("use", "project") alone no longer seed. 0 turns it off.
+	MinMatchedIDFShare float64 `json:"min_matched_idf_share"`
+	// MinEvidenceNodes: the minimum-evidence check applies only to graphs of
+	// at least this many neurons. In a small graph the words of its dominant
+	// topic ("server", "run") occur in most neurons, so document frequency
+	// would mark the very words that matter as generic.
+	MinEvidenceNodes int `json:"min_evidence_nodes"`
 	// VectorCosLow and VectorCosHigh calibrate embedding similarity into a
 	// semantic seed strength S = clamp((cos − low)/(high − low), 0, 1):
 	// cosine at or below low is no evidence, at or above high is certain.
 	VectorCosLow  float64 `json:"vector_cos_low"`
 	VectorCosHigh float64 `json:"vector_cos_high"`
+	// LexicalCosLow and LexicalCosHigh: with embeddings, a lexical (BM25)
+	// seed counts only as far as the neuron's embedding agrees with the
+	// query: its strength is multiplied by clamp((cos − low)/(high − low)).
+	// A keyword coincidence (a generic word such as "build" or "going" shared
+	// with an unrelated neuron) has a cosine near zero and stops seeding.
+	// lexical_cos_high = 0 turns the check off.
+	LexicalCosLow  float64 `json:"lexical_cos_low"`
+	LexicalCosHigh float64 `json:"lexical_cos_high"`
 	// EmbedMaxWords truncates texts before embedding.
 	EmbedMaxWords int `json:"embed_max_words"`
 	// MinSeedStrength drops seeds whose strength (relative BM25 × query
 	// confidence) is below it; a query without a good match recalls nothing.
 	MinSeedStrength float64 `json:"min_seed_strength"`
+	// ForeignProjectFactor scales the seed strength of a neuron that belongs
+	// to other projects only (created or used there, never in the recall's
+	// project, in fewer than SharedMinProjects projects and not tagged
+	// "global"), so foreign knowledge needs stronger evidence and spreads
+	// less. ForeignProjectFactorExplicit applies to recalls Claude issues
+	// itself (an explicit query is a stronger signal). 1 turns it off.
+	ForeignProjectFactor         float64 `json:"foreign_project_factor"`
+	ForeignProjectFactorExplicit float64 `json:"foreign_project_factor_explicit"`
+	// SharedMinProjects: a neuron used in at least this many projects is
+	// shared knowledge, never foreign.
+	SharedMinProjects int `json:"shared_min_projects"`
+	// SupersededFactor scales the score of a superseded neuron in explicit
+	// recall (the prompt hook leaves superseded neurons out entirely).
+	SupersededFactor float64 `json:"superseded_factor"`
 	// HopDecay is δ, the per-hop attenuation.
 	HopDecay float64 `json:"hop_decay"`
 	// FiringThreshold is θ: a node is reached only if its activation ≥ θ.
@@ -120,10 +164,24 @@ type Params struct {
 	// --- Sessions (Claude Code plugin) ---
 
 	// ContextLinkWeight is the weight of the associative links a new neuron
-	// gets to the neurons its session used or created before it.
+	// gets to the neurons its session used or created before it. These links
+	// are tentative: below firing_threshold / hop_decay they carry no
+	// activation until co-use potentiates them (see Warnings).
 	ContextLinkWeight float64 `json:"context_link_weight"`
 	// ContextLinks caps how many recent session neurons a new one links to.
 	ContextLinks int `json:"context_links"`
+	// WindowLTPFactor scales the LTP rate between a neuron reported used and
+	// the neurons the session reported used within the task window (see
+	// ContextWindow; 0 turns this off).
+	WindowLTPFactor float64 `json:"window_ltp_factor"`
+	// WindowLTPMinCos: with embeddings, co-use within the window links two
+	// neurons only if their embedding cosine is at least this (0 = always).
+	WindowLTPMinCos float64 `json:"window_ltp_min_cos"`
+	// ContextWindow is the task window: the current user prompt and the
+	// ContextWindow prompts before it (notifications do not count). A new
+	// neuron links only to session neurons used or created in it. 0 = the
+	// whole session.
+	ContextWindow int `json:"context_window"`
 	// DedupeCos: adding a neuron whose embedding has at least this cosine to
 	// an existing one returns the existing one instead (unless forced).
 	DedupeCos float64 `json:"dedupe_cos"`
@@ -143,6 +201,10 @@ func DefaultParams() Params {
 	return Params{
 		LearningRate:   0.2,
 		DepressionRate: 0.15,
+
+		LTDIndirectFactor:  0.5,
+		RecallAccessWeight: 0.2,
+
 		ReinforceTopK:  12,
 		TraceRetention: 1000,
 
@@ -164,20 +226,29 @@ func DefaultParams() Params {
 		MaxAccessRecords: 50,
 		DormantBelow:     -4,
 
-		SeedLimit:        10,
-		AbsentTermWeight: 0.5,
-		MinSeedStrength:  0.25,
-		VectorCosLow:     0.25,
-		VectorCosHigh:    0.6,
-		EmbedMaxWords:    200,
-		HopDecay:         0.8,
-		FiringThreshold:  0.1,
-		FanK0:            8,
-		FanBeta:          0.5,
-		MaxNodes:         200,
-		MaxHops:          10,
-		EdgesPerNode:     64,
-		ResultLimit:      10,
+		SeedLimit:          10,
+		AbsentTermWeight:   0.5,
+		MinMatchedIDFShare: 1,
+		MinEvidenceNodes:   50,
+		MinSeedStrength:    0.25,
+		VectorCosLow:       0.25,
+		VectorCosHigh:      0.6,
+		LexicalCosLow:      0.05,
+		LexicalCosHigh:     0.25,
+		EmbedMaxWords:      200,
+		SupersededFactor:   0.5,
+
+		ForeignProjectFactor:         0.5,
+		ForeignProjectFactorExplicit: 0.8,
+		SharedMinProjects:            2,
+		HopDecay:                     0.8,
+		FiringThreshold:              0.1,
+		FanK0:                        8,
+		FanBeta:                      0.5,
+		MaxNodes:                     200,
+		MaxHops:                      10,
+		EdgesPerNode:                 64,
+		ResultLimit:                  10,
 
 		ScoreGraph:      0.7,
 		ScoreBaseLevel:  0.2,
@@ -188,8 +259,11 @@ func DefaultParams() Params {
 		BM25Rationale: 1,
 		BM25Tags:      3,
 
-		ContextLinkWeight:        0.3,
+		ContextLinkWeight:        0.1,
 		ContextLinks:             10,
+		ContextWindow:            3,
+		WindowLTPFactor:          0.5,
+		WindowLTPMinCos:          0.4,
 		DedupeCos:                0.9,
 		NudgeMinToolCalls:        5,
 		ConsolidateEverySessions: 10,
@@ -209,6 +283,10 @@ func (p Params) Validate() error {
 		"context_link_weight": p.ContextLinkWeight, "dedupe_cos": p.DedupeCos,
 		"learn_min_confidence": p.LearnMinConfidence, "learn_min_activation": p.LearnMinActivation,
 		"vector_cos_low": p.VectorCosLow, "vector_cos_high": p.VectorCosHigh,
+		"lexical_cos_low": p.LexicalCosLow, "lexical_cos_high": p.LexicalCosHigh,
+		"superseded_factor": p.SupersededFactor, "foreign_project_factor": p.ForeignProjectFactor,
+		"foreign_project_factor_explicit": p.ForeignProjectFactorExplicit,
+		"ltd_indirect_factor":             p.LTDIndirectFactor, "recall_access_weight": p.RecallAccessWeight,
 	}
 	for k, v := range in01 {
 		if v < 0 || v > 1 {
@@ -220,6 +298,12 @@ func (p Params) Validate() error {
 		"max_stability": p.MaxStability, "max_out_weight": p.MaxOutWeight,
 		"fan_k0": p.FanK0, "actr_decay": p.ActrDecay,
 	}
+	if p.LTDAllLinks != 0 && p.LTDAllLinks != 1 {
+		return fmt.Errorf("ltd_all_links must be 0 or 1, got %d", p.LTDAllLinks)
+	}
+	if p.MinMatchedIDFShare < 0 {
+		return fmt.Errorf("min_matched_idf_share must be ≥ 0, got %g", p.MinMatchedIDFShare)
+	}
 	for k, v := range pos {
 		if v <= 0 {
 			return fmt.Errorf("%s must be > 0, got %g", k, v)
@@ -228,15 +312,28 @@ func (p Params) Validate() error {
 	if p.VectorCosLow >= p.VectorCosHigh {
 		return fmt.Errorf("vector_cos_low (%g) must be below vector_cos_high (%g)", p.VectorCosLow, p.VectorCosHigh)
 	}
+	if p.LexicalCosHigh > 0 && p.LexicalCosLow >= p.LexicalCosHigh {
+		return fmt.Errorf("lexical_cos_low (%g) must be below lexical_cos_high (%g)", p.LexicalCosLow, p.LexicalCosHigh)
+	}
 	if p.FiringThreshold == 0 {
 		return fmt.Errorf("firing_threshold must be > 0")
 	}
 	if p.ReinforceTopK < 2 || p.SeedLimit < 1 || p.MaxNodes < 1 || p.MaxHops < 1 ||
 		p.EdgesPerNode < 1 || p.ResultLimit < 1 || p.MaxAccessRecords < 1 || p.TraceRetention < 1 || p.EmbedMaxWords < 1 ||
-		p.ContextLinks < 0 || p.NudgeMinToolCalls < 0 || p.ConsolidateEverySessions < 1 {
+		p.ContextLinks < 0 || p.ContextWindow < 0 || p.SharedMinProjects < 1 || p.MinEvidenceNodes < 0 || p.NudgeMinToolCalls < 0 || p.ConsolidateEverySessions < 1 {
 		return fmt.Errorf("integer limits must be positive (reinforce_top_k ≥ 2)")
 	}
 	return nil
+}
+
+// Warnings reports valid but questionable settings.
+func (p Params) Warnings() []string {
+	var w []string
+	if p.ContextLinkWeight*p.HopDecay >= p.FiringThreshold {
+		w = append(w, fmt.Sprintf("context_link_weight · hop_decay (%g) ≥ firing_threshold (%g): context links spread activation before co-use confirms them",
+			p.ContextLinkWeight*p.HopDecay, p.FiringThreshold))
+	}
+	return w
 }
 
 // ToMap renders params as key → string value.

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -164,7 +166,7 @@ func TestAccessTrimAndTraces(t *testing.T) {
 			return err
 		}
 		for i := 0; i < 10; i++ {
-			if err := tx.RecordAccess("a", int64(i), 3); err != nil {
+			if err := tx.RecordAccess("a", int64(i), 0.2, 3); err != nil {
 				return err
 			}
 		}
@@ -182,8 +184,8 @@ func TestAccessTrimAndTraces(t *testing.T) {
 			t.Fatalf("accesses not trimmed: %v", acc)
 		}
 		for _, a := range acc["a"] {
-			if a < 7 {
-				t.Fatalf("kept an old access: %v", a)
+			if a.Tick < 7 || a.Weight != 0.2 {
+				t.Fatalf("kept an old access or lost its weight: %v", a)
 			}
 		}
 		trs, _ := tx.PendingTraces("s")
@@ -495,7 +497,15 @@ func TestMigrationDropsRetiredPruneThreshold(t *testing.T) {
 		if err := tx.SetParam("hop_decay", "0.7"); err != nil {
 			return err
 		}
-		_, err := tx.tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, len(migrations)-1))
+		// Back to the version before the prune migration, undoing the later ones.
+		for _, drop := range []string{`ALTER TABLE session_nodes DROP COLUMN prompt_no`, `ALTER TABLE nodes DROP COLUMN superseded_by`, `DROP TABLE node_projects`, `ALTER TABLE node_access DROP COLUMN weight`} {
+			if _, err := tx.tx.Exec(drop); err != nil {
+				return err
+			}
+		}
+		_, err := tx.tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, slices.IndexFunc(migrations, func(m string) bool {
+			return strings.Contains(m, "DELETE FROM params WHERE key = 'prune_threshold'")
+		})))
 		return err
 	})
 	s.Close()
@@ -511,4 +521,74 @@ func TestMigrationDropsRetiredPruneThreshold(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+// The node_projects migration backfills from the session history (created
+// flag, uses = sessions reporting the neuron used), and recording session
+// neurons keeps it current.
+func TestNodeProjectsBackfillAndUpkeep(t *testing.T) {
+	s, path := openTest(t)
+	now := time.Now()
+	mustWrite(t, s, func(tx *Tx) error {
+		for _, id := range []string{"a", "b"} {
+			if err := tx.InsertNode(node(id, "neuron "+id, "")); err != nil {
+				return err
+			}
+		}
+		for sess, project := range map[string]string{"s1": "/p1", "s2": "/p2", "s3": "/p2", "s4": ""} {
+			if err := tx.TouchSession(sess, project, now); err != nil {
+				return err
+			}
+		}
+		for _, r := range []struct{ sess, role, id string }{
+			{"s1", "created", "a"}, {"s2", "used", "a"}, {"s3", "used", "a"}, {"s4", "used", "b"}, {"s1", "episode", "b"},
+		} {
+			if err := tx.AddSessionNodes(r.sess, r.role, []string{r.id}, now); err != nil {
+				return err
+			}
+		}
+		// Back to the version before the migration, as an old database
+		// (undoing the later ones too).
+		for _, undo := range []string{`DROP TABLE node_projects`, `ALTER TABLE node_access DROP COLUMN weight`} {
+			if _, err := tx.tx.Exec(undo); err != nil {
+				return err
+			}
+		}
+		_, err := tx.tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, slices.IndexFunc(migrations, func(m string) bool {
+			return strings.Contains(m, "CREATE TABLE node_projects")
+		})))
+		return err
+	})
+	s.Close()
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	want := map[string][]NodeProject{"a": {{Project: "/p1", Created: true}, {Project: "/p2", Uses: 2}}}
+	check := func(when string) {
+		t.Helper()
+		_ = s2.Read(func(tx *Tx) error {
+			got, err := tx.NodeProjects([]string{"a", "b"})
+			if err != nil || fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Fatalf("%s: %v %v, want %v", when, err, got, want)
+			}
+			return nil
+		})
+	}
+	check("backfill")
+	// A further use in a new session counts; the same session again does not.
+	mustWrite(t, s2, func(tx *Tx) error {
+		if err := tx.TouchSession("s5", "/p1", now); err != nil {
+			return err
+		}
+		for range 2 {
+			if err := tx.AddSessionNodes("s5", "used", []string{"a"}, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	want["a"][0].Uses = 1
+	check("upkeep")
 }

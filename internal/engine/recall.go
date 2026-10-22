@@ -2,13 +2,16 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"math"
+	"path/filepath"
 	"slices"
 	"sort"
 
 	"github.com/oklog/ulid/v2"
 
 	"github.com/vhavlena/plasticity/internal/model"
+	"github.com/vhavlena/plasticity/internal/paths"
 	"github.com/vhavlena/plasticity/internal/plasticity"
 	"github.com/vhavlena/plasticity/internal/retrieval"
 	"github.com/vhavlena/plasticity/internal/store"
@@ -23,8 +26,14 @@ func (e *Engine) Search(query string, limit int) ([]store.SearchHit, error) {
 	var hits []store.SearchHit
 	err := e.st.Read(func(tx *store.Tx) error {
 		var err error
-		hits, err = tx.Search(MatchExpr(query), e.bm25Weights(), limit)
-		return err
+		if hits, err = tx.Search(MatchExpr(query), e.bm25Weights(), limit); err != nil {
+			return err
+		}
+		nodes := make([]*model.Node, len(hits))
+		for i, h := range hits {
+			nodes[i] = h.Node
+		}
+		return fillSuccessorTitles(tx, nodes...)
 	})
 	if hits == nil {
 		hits = []store.SearchHit{}
@@ -74,9 +83,25 @@ type RecallRequest struct {
 	HopDecay  float64
 	Rerank    string // "" or "ppr"
 	NoRecord  bool   // do not record accesses or traces
+	// Project is the project the recall is made in; neurons of other
+	// projects only seed weaker (see ForeignProjectFactor). If empty, the
+	// session's project is used.
+	Project string
+	// Auto marks a recall injected automatically by the prompt hook, as
+	// opposed to one Claude issued itself (explicit).
+	Auto bool
+	// MinConfidence: a recall whose query confidence stays below it returns
+	// no hits and records nothing (no access, firing or trace).
+	MinConfidence float64
 	// ExcludeTypes leaves neurons of these types out of the hits; they
 	// still carry activation to their neighbors.
 	ExcludeTypes []model.NodeType
+	// ExcludeSuperseded leaves superseded neurons out of the hits (they still
+	// carry activation to their neighbors): each one's activation goes to its
+	// current successor instead, so a query worded like the old neuron finds
+	// the new one. Without it, superseded neurons stay visible with their
+	// score scaled by superseded_factor.
+	ExcludeSuperseded bool
 }
 
 // RecallHit is one recalled neuron.
@@ -92,6 +117,9 @@ type RecallHit struct {
 	Hops       int      `json:"hops"`
 	Path       []string `json:"path"`
 	PathTitles []string `json:"path_titles"`
+	// Supersedes are the titles of superseded neurons whose activation was
+	// redirected to this one (with ExcludeSuperseded).
+	Supersedes []string `json:"supersedes,omitempty"`
 }
 
 // RecallResult is the answer to a recall.
@@ -100,7 +128,9 @@ type RecallResult struct {
 	RecallID string `json:"recall_id,omitempty"`
 	// TraceSkipped explains why no trace was stored despite a session.
 	TraceSkipped string `json:"trace_skipped,omitempty"`
-	Query        string `json:"query"`
+	// Suppressed explains why a recall with seeds returned no hits.
+	Suppressed string `json:"suppressed,omitempty"`
+	Query      string `json:"query"`
 	// Confidence is max(LexicalConfidence, SemanticConfidence); it gates
 	// learning.
 	Confidence float64 `json:"confidence"`
@@ -150,18 +180,32 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 		if err != nil {
 			return err
 		}
-		sem, err := e.semanticSearch(tx, qvec, p.SeedLimit)
+		var lexCos map[string]float64 // cosines of the lexical hits, to corroborate them
+		if qvec != nil && p.LexicalCosHigh > 0 {
+			lexCos = make(map[string]float64, len(hits))
+			for _, h := range hits {
+				lexCos[h.Node.ID] = math.NaN() // NaN: the neuron has no vector
+			}
+		}
+		sem, err := e.semanticSearch(tx, qvec, p.SeedLimit, lexCos)
 		if err != nil {
 			return err
 		}
-		sd, err := e.computeSeeds(tx, terms, hits, sem)
+		sd, err := e.computeSeeds(tx, terms, hits, sem, lexCos)
 		if err != nil {
+			return err
+		}
+		if err := e.applyProjectAffinity(tx, &req, sd.seeds); err != nil {
 			return err
 		}
 		seeds := sd.seeds
 		res.Confidence, res.Terms, res.Seeds = sd.confidence(), sd.terms, len(seeds)
 		res.LexicalConfidence, res.SemanticConfidence = sd.lexical, sd.semantic
 		if len(seeds) == 0 {
+			return nil
+		}
+		if res.Confidence < req.MinConfidence {
+			res.Suppressed = fmt.Sprintf("query confidence %.2f below %.2f", res.Confidence, req.MinConfidence)
 			return nil
 		}
 
@@ -193,19 +237,38 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 		if err != nil {
 			return err
 		}
+		act := spread.Activations
+		redirected := map[string][]string{} // successor → superseded neurons it took activation from
+		replaced := map[string]bool{}       // superseded neurons with a current successor
+		if req.ExcludeSuperseded {
+			if act, ids, err = redirectSuperseded(tx, act, ids, graphScore, nodes, redirected); err != nil {
+				return err
+			}
+			for _, olds := range redirected {
+				for _, old := range olds {
+					replaced[old] = true
+				}
+			}
+		}
 		acc, err := tx.Accesses(ids)
 		if err != nil {
 			return err
 		}
 		for _, id := range ids {
-			n, a := nodes[id], spread.Activations[id]
-			if n == nil || slices.Contains(req.ExcludeTypes, n.Type) {
+			n, a := nodes[id], act[id]
+			if n == nil || slices.Contains(req.ExcludeTypes, n.Type) || req.ExcludeSuperseded && replaced[id] {
 				continue
 			}
 			b := plasticity.BaseLevel(acc[id], tick, p.ActrDecay)
 			h := RecallHit{
 				Node: n, Activation: a.Score, IsSeed: a.IsSeed, Hops: a.Hops, Path: a.Path,
 				Score: p.ScoreGraph*graphScore[id] + p.ScoreBaseLevel*plasticity.Sigmoid(b) + p.ScoreImportance*n.Importance,
+			}
+			if n.SupersededBy != "" {
+				h.Score *= p.SupersededFactor
+			}
+			for _, old := range redirected[id] {
+				h.Supersedes = append(h.Supersedes, nodes[old].Title)
 			}
 			if len(acc[id]) > 0 {
 				h.BaseLevel = &b
@@ -219,6 +282,13 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 				}
 			}
 			res.Hits = append(res.Hits, h)
+		}
+		hitNodes := make([]*model.Node, len(res.Hits))
+		for i, h := range res.Hits {
+			hitNodes[i] = h.Node
+		}
+		if err := fillSuccessorTitles(tx, hitNodes...); err != nil {
+			return err
 		}
 		sort.Slice(res.Hits, func(i, j int) bool {
 			if res.Hits[i].Score != res.Hits[j].Score {
@@ -244,7 +314,14 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 		} else {
 			for _, h := range res.Hits {
 				if h.Activation >= p.LearnMinActivation {
-					tr.Entries = append(tr.Entries, store.TraceEntry{NodeID: h.Node.ID, Activation: h.Activation, Path: h.Path})
+					// A seed was found on its own evidence even if a stronger
+					// path reached it through a neighbor: learning treats it as
+					// its own source (feedback weakens no link for it).
+					path := h.Path
+					if h.IsSeed {
+						path = []string{h.Node.ID}
+					}
+					tr.Entries = append(tr.Entries, store.TraceEntry{NodeID: h.Node.ID, Activation: h.Activation, Path: path})
 				}
 			}
 			if len(tr.Entries) == 0 {
@@ -255,24 +332,40 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 			}
 		}
 	}
-	// A recorded recall advances the global clock and fires the recalled
-	// neurons, which ages their synapses to neurons that did not fire.
+	// A recorded recall advances the global clock. Only a confident recall
+	// is evidence about its hits: it fires them (which ages their synapses
+	// to neurons that did not fire) and records a light access for each hit
+	// that is not foreign to the recall's project. A low-confidence recall
+	// changes nothing else, so noisy recalls neither age true links nor
+	// feed the ACT-R base level.
+	confident := res.Confidence >= p.LearnMinConfidence
 	err = e.st.Write(func(tx *store.Tx) error {
 		tick, err := tx.AdvanceTick()
 		if err != nil {
 			return err
 		}
 		tr.Tick = tick
+		if !confident {
+			return nil
+		}
 		ids := make([]string, len(res.Hits))
 		for i, h := range res.Hits {
 			ids[i] = h.Node.ID
 		}
+		foreign, err := e.foreignSet(tx, req.Project, ids)
+		if err != nil {
+			return err
+		}
+		ids = slices.DeleteFunc(ids, func(id string) bool { return foreign[id] })
 		if err := tx.Fire(ids); err != nil {
 			return err
 		}
 		for _, h := range res.Hits {
+			if foreign[h.Node.ID] {
+				continue
+			}
 			h.Node.Fires++
-			if err := tx.RecordAccess(h.Node.ID, tick, p.MaxAccessRecords); err != nil {
+			if err := tx.RecordAccess(h.Node.ID, tick, p.RecallAccessWeight, p.MaxAccessRecords); err != nil {
 				return err
 			}
 			if h.Node.Dormant { // recalling a dormant memory reactivates it
@@ -288,4 +381,170 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 		return tx.InsertTrace(tr)
 	})
 	return res, err
+}
+
+// redirectSuperseded moves the activation of every reached superseded neuron
+// to its current successor: the successor's activation (and graph score)
+// becomes the maximum of its own and the old neuron's. A successor reached
+// itself keeps its own path; one reached only through the redirect gets the
+// old neuron's path followed by itself.
+// Successors not reached by spreading are added to ids (and nodes).
+// redirected collects, per successor, the superseded neurons it absorbed.
+func redirectSuperseded(tx *store.Tx, act map[string]*retrieval.Activation, ids []string, graphScore map[string]float64,
+	nodes map[string]*model.Node, redirected map[string][]string) (map[string]*retrieval.Activation, []string, error) {
+	out := make(map[string]*retrieval.Activation, len(act))
+	for id, a := range act {
+		out[id] = a
+	}
+	for _, id := range ids {
+		n := nodes[id]
+		if n == nil || n.SupersededBy == "" {
+			continue
+		}
+		s, err := currentSuccessor(tx, id, nodes)
+		if err != nil {
+			return nil, nil, err
+		}
+		if s == "" {
+			continue // broken or cyclic chain: nothing to redirect to
+		}
+		redirected[s] = append(redirected[s], id)
+		old := act[id]
+		switch cur, ok := out[s]; {
+		case !ok: // reached only through the redirect
+			ids = append(ids, s)
+			out[s] = &retrieval.Activation{ID: s, Score: old.Score, Seed: old.Seed, Hops: old.Hops + 1,
+				Path: append(slices.Clone(old.Path), s)}
+		case cur.Score < old.Score: // reached itself: keep its own path and seed status
+			c := *cur
+			c.Score = old.Score
+			out[s] = &c
+		}
+		graphScore[s] = math.Max(graphScore[s], graphScore[id])
+	}
+	sort.Strings(ids)
+	return out, ids, nil
+}
+
+// GlobalTag marks a neuron as knowledge shared by all projects (preferences,
+// tool tips, shared infrastructure): it is never foreign.
+const GlobalTag = "global"
+
+// applyProjectAffinity scales the seeds that are foreign to the recall's
+// project by ForeignProjectFactor (ForeignProjectFactorExplicit for recalls
+// Claude issued) and drops those that fall below MinSeedStrength. A neuron is foreign if it has project records, none of
+// them for this project, it is used in fewer than SharedMinProjects
+// projects, and it is not tagged global. Neurons without project records
+// (legacy, imported) are never foreign. The project defaults to the
+// session's.
+func (e *Engine) applyProjectAffinity(tx *store.Tx, req *RecallRequest, seeds map[string]float64) error {
+	if req.Project == "" && req.Session != "" { // also used when recording the recall
+		s, err := tx.GetSession(req.Session)
+		if err != nil {
+			return err
+		}
+		if s != nil {
+			req.Project = s.Project
+		}
+	}
+	factor := e.P.ForeignProjectFactor
+	if !req.Auto {
+		factor = e.P.ForeignProjectFactorExplicit
+	}
+	if len(seeds) == 0 || factor >= 1 || req.Project == "" {
+		return nil
+	}
+	ids := make([]string, 0, len(seeds))
+	for id := range seeds {
+		ids = append(ids, id)
+	}
+	foreign, err := e.foreignSet(tx, req.Project, ids)
+	if err != nil {
+		return err
+	}
+	for id := range foreign {
+		// The scaled seed faces MinSeedStrength again: foreign knowledge
+		// needs 1/factor times the evidence to seed at all.
+		if seeds[id] *= factor; seeds[id] < e.P.MinSeedStrength {
+			delete(seeds, id)
+		}
+	}
+	return nil
+}
+
+// foreignSet returns which of ids are foreign to project (none if project
+// is ""): neurons with project records, none for project, used in fewer
+// than SharedMinProjects projects, and not tagged global.
+func (e *Engine) foreignSet(tx *store.Tx, project string, ids []string) (map[string]bool, error) {
+	foreign := map[string]bool{}
+	if project == "" || len(ids) == 0 {
+		return foreign, nil
+	}
+	projects, err := tx.NodeProjects(ids)
+	if err != nil {
+		return nil, err
+	}
+	project = e.normProject(project)
+	for _, ps := range projects {
+		for i := range ps {
+			ps[i].Project = e.normProject(ps[i].Project)
+		}
+	}
+	var candidates []string
+	for _, id := range ids {
+		if foreignByProjects(projects[id], project, e.P.SharedMinProjects) {
+			candidates = append(candidates, id)
+		}
+	}
+	if len(candidates) == 0 {
+		return foreign, nil
+	}
+	nodes, err := tx.GetNodes(candidates)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range candidates {
+		if n := nodes[id]; n != nil && !slices.Contains(n.Tags, GlobalTag) {
+			foreign[id] = true
+		}
+	}
+	return foreign, nil
+}
+
+// normProject resolves a stored project directory the way paths.Project
+// does now (symlinks, worktrees → main repository), so records written
+// before that resolution existed match a recall's project. Names that are
+// not absolute paths (as in evaluation scenarios) are left as they are.
+func (e *Engine) normProject(p string) string {
+	if !filepath.IsAbs(p) {
+		return p
+	}
+	if n, ok := e.projectNorm[p]; ok {
+		return n
+	}
+	if e.projectNorm == nil {
+		e.projectNorm = map[string]string{}
+	}
+	n := paths.Project(p)
+	e.projectNorm[p] = n
+	return n
+}
+
+// foreignByProjects reports whether a neuron with these project records is
+// foreign to project: it has records, none for project, and is used in
+// fewer than sharedMin projects.
+func foreignByProjects(ps []store.NodeProject, project string, sharedMin int) bool {
+	if len(ps) == 0 {
+		return false
+	}
+	used := map[string]bool{} // distinct projects (records may normalize to the same one)
+	for _, p := range ps {
+		if p.Project == project {
+			return false
+		}
+		if p.Uses > 0 {
+			used[p.Project] = true
+		}
+	}
+	return len(used) < sharedMin
 }

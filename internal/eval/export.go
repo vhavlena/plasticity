@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/vhavlena/plasticity/internal/engine"
+	"github.com/vhavlena/plasticity/internal/hooks"
 	"github.com/vhavlena/plasticity/internal/model"
 	"github.com/vhavlena/plasticity/internal/store"
 )
@@ -171,7 +172,16 @@ func ExportSessions(events []store.Event, nodes []*model.Node, edges []engine.Ex
 				st.Unlabeled++
 				continue
 			}
-			sess.Queries = append(sess.Queries, Query{Q: p.query(), Relevant: rel})
+			q := Query{Q: p.query(), Relevant: rel}
+			switch p.Source {
+			case "", engine.RecallSourcePrompt:
+				if hooks.IsNotification(q.Q) {
+					q.Source = SourceNotification // logged raw: replay through the hook's plan
+				}
+			case engine.RecallSourceNotification:
+				q.Source, q.Planned = SourceNotification, true // logged after planning
+			}
+			sess.Queries = append(sess.Queries, q)
 		}
 		if len(sess.Queries) > 0 {
 			s.Sessions = append(s.Sessions, sess)

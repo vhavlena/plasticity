@@ -108,7 +108,7 @@ func newRoot(out io.Writer, in io.Reader) *cobra.Command {
 	root.AddCommand(
 		a.initCmd(), a.addCmd(), a.usedCmd(), a.noteCmd(), a.logCmd(), a.hookCmd(), a.getCmd(), a.updateCmd(), a.deleteCmd(),
 		a.linkCmd(), a.unlinkCmd(), a.searchCmd(), a.recallCmd(),
-		a.reinforceCmd(), a.feedbackCmd(), a.consolidateCmd(),
+		a.reinforceCmd(), a.feedbackCmd(), a.consolidateCmd(), a.maintainCmd(),
 		a.statsCmd(), a.sessionsCmd(), a.exportCmd(), a.vizCmd(), a.paramsCmd(), a.embedCmd(), a.evalCmd(),
 	)
 	return root
@@ -173,14 +173,26 @@ near-identical embedding exists, nothing is inserted and the result names it in
 "duplicate_of" (update or link it instead, or pass --force).
 
 With --session, the neuron is linked to the neurons the session used or created
-before it, so new knowledge is encoded in its context.`,
+before it, so new knowledge is encoded in its context.
+
+With --supersedes, the listed neurons are marked as replaced by the new one: the
+prompt hook no longer injects them and recall redirects to the new neuron. The
+result lists "similar" existing neurons; if one of them is outdated, mark it with
+'update ID --superseded-by NEW' (or update its content if it is partly true).`,
 		Args: cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			n := &model.Node{Type: model.NodeType(f.typ), Title: f.title, Content: f.content,
 				Rationale: f.rationale, Tags: f.tags, Source: f.source, Importance: f.importance}
+			importanceSet := cmd.Flags().Changed("importance")
 			if stdin {
+				var raw map[string]json.RawMessage
+				if err := json.NewDecoder(a.in).Decode(&raw); err != nil {
+					return fmt.Errorf("decode node from stdin: %w", err)
+				}
+				_, importanceSet = raw["importance"]
+				b, _ := json.Marshal(raw)
 				n = &model.Node{Type: model.TypeFact}
-				if err := json.NewDecoder(a.in).Decode(n); err != nil {
+				if err := json.Unmarshal(b, n); err != nil {
 					return fmt.Errorf("decode node from stdin: %w", err)
 				}
 			}
@@ -198,6 +210,12 @@ before it, so new knowledge is encoded in its context.`,
 				if err != nil || res.Node == nil {
 					return res, err
 				}
+				// Importance stays 0 by default (stored data keeps its meaning),
+				// but a forgotten one is the most common way a neuron is mis-weighted.
+				if !importanceSet {
+					res.Warning = importanceWarning
+					e.Warnings = append(e.Warnings, importanceWarning)
+				}
 				for _, l := range specs {
 					if _, err := e.Link(res.Node.ID, l.dst, l.kind, l.weight); err != nil {
 						return nil, fmt.Errorf("node %s added, but link to %s failed: %w", res.Node.ID, l.dst, err)
@@ -212,8 +230,11 @@ before it, so new knowledge is encoded in its context.`,
 	c.Flags().StringArrayVar(&links, "link", nil, "link new node → ID, as ID[:kind[:weight]] (repeatable)")
 	c.Flags().StringVarP(&opt.Session, "session", "s", "", "session ID: link to the session's context and record as created by it")
 	c.Flags().BoolVar(&opt.Force, "force", false, "insert even if a near-duplicate exists")
+	c.Flags().StringSliceVar(&opt.Supersedes, "supersedes", nil, "IDs of neurons the new one replaces (they are no longer injected)")
 	return c
 }
+
+const importanceWarning = "importance not set: pass --importance 0..1"
 
 func (a *app) usedCmd() *cobra.Command {
 	var session string
@@ -325,6 +346,8 @@ func (a *app) getCmd() *cobra.Command {
 
 func (a *app) updateCmd() *cobra.Command {
 	var f nodeFlags
+	var supersededBy string
+	var clearSuperseded bool
 	c := &cobra.Command{
 		Use:   "update ID",
 		Short: "Update fields of a neuron (only the given flags change)",
@@ -354,10 +377,22 @@ func (a *app) updateCmd() *cobra.Command {
 			if ch("importance") {
 				p.Importance = &f.importance
 			}
+			if ch("superseded-by") && clearSuperseded {
+				return fmt.Errorf("--superseded-by and --clear-superseded exclude each other")
+			}
+			if ch("superseded-by") {
+				p.SupersededBy = &supersededBy
+			}
+			if clearSuperseded {
+				none := ""
+				p.SupersededBy = &none
+			}
 			return a.with(func(e *engine.Engine) (any, error) { return e.UpdateNode(args[0], p) })
 		},
 	}
 	f.register(c)
+	c.Flags().StringVar(&supersededBy, "superseded-by", "", "mark the neuron as replaced by this ID")
+	c.Flags().BoolVar(&clearSuperseded, "clear-superseded", false, "mark the neuron as current again")
 	return c
 }
 
@@ -434,6 +469,9 @@ connections carry activation further than weak ones. Accesses are recorded
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			req.Query = strings.Join(args, " ")
+			if req.Project != "" {
+				req.Project = paths.Project(req.Project)
+			}
 			if req.Rerank != "" && req.Rerank != "ppr" {
 				return fmt.Errorf("--rerank: only 'ppr' is supported")
 			}
@@ -453,6 +491,7 @@ connections carry activation further than weak ones. Accesses are recorded
 	c.Flags().Float64Var(&req.HopDecay, "hop-decay", 0, "per-hop decay δ (default: hop_decay)")
 	c.Flags().StringVar(&req.Rerank, "rerank", "", "rerank activated subgraph: ppr")
 	c.Flags().BoolVar(&req.NoRecord, "no-record", false, "do not record accesses or traces")
+	c.Flags().StringVar(&req.Project, "project", "", "project directory of the recall (default: the session's); neurons of other projects seed weaker")
 	return c
 }
 
@@ -507,6 +546,36 @@ func (a *app) consolidateCmd() *cobra.Command {
 			return a.with(func(e *engine.Engine) (any, error) { return e.Consolidate() })
 		},
 	}
+	return c
+}
+
+func (a *app) maintainCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "maintain",
+		Short: "One-off repairs of an existing graph",
+	}
+	var from, to float64
+	var dryRun bool
+	demote := &cobra.Command{
+		Use:   "demote-unconfirmed",
+		Short: "Lower context links that were never co-used to the tentative weight",
+		Long: "Context links made before they became tentative (weight 0.3) spread activation\n" +
+			"although nothing confirmed them. This lowers associative links with no\n" +
+			"co-activation whose weight is still --from to --to (default: context_link_weight).",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return a.with(func(e *engine.Engine) (any, error) {
+				if !cmd.Flags().Changed("to") {
+					to = e.P.ContextLinkWeight
+				}
+				return e.DemoteUnconfirmed(from, to, dryRun)
+			})
+		},
+	}
+	demote.Flags().Float64Var(&from, "from", 0.3, "weight of the links to demote (the old context_link_weight)")
+	demote.Flags().Float64Var(&to, "to", 0, "new weight (default: context_link_weight)")
+	demote.Flags().BoolVar(&dryRun, "dry-run", false, "only list the links that would change")
+	c.AddCommand(demote)
 	return c
 }
 
@@ -628,6 +697,9 @@ func (a *app) paramsCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, args []string) error {
 			return a.with(func(e *engine.Engine) (any, error) {
 				err := e.SetParam(args[0], args[1])
+				for _, w := range e.P.Warnings() {
+					fmt.Fprintln(os.Stderr, "warning:", w)
+				}
 				return e.P, err
 			})
 		},

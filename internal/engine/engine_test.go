@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -633,5 +634,78 @@ func TestLearnedLinkDoesNotSelfReinforce(t *testing.T) {
 	}
 	if got := f.weight("sqlite", "badger"); got != w {
 		t.Fatalf("synapse reinforced itself: %g → %g", w, got)
+	}
+}
+
+// A recall below MinConfidence returns nothing and records nothing.
+func TestRecallMinConfidence(t *testing.T) {
+	f := newFixture(t, WithoutEmbeddings())
+	q := RecallRequest{Query: "sqlite storage lock cooking kubernetes helm", Session: "S", Limit: 5}
+	weak := q
+	weak.MinConfidence = 0.99
+	r, err := f.e.Recall(weak)
+	if err != nil || len(r.Hits) != 0 || r.Suppressed == "" || r.RecallID != "" || r.Confidence >= 0.99 || r.Seeds == 0 {
+		t.Fatalf("suppressed recall: %v %+v", err, r)
+	}
+	n, _ := f.e.node(f.ids["sqlite"])
+	if st, _ := f.e.Stats(); n.Fires != 0 || st.PendingTraces != 0 {
+		t.Fatalf("a suppressed recall must not fire neurons or store traces: fires %d, %+v", n.Fires, st)
+	}
+	if r, _ := f.e.Recall(q); len(r.Hits) == 0 || r.Suppressed != "" {
+		t.Fatalf("without the threshold the same query recalls: %+v", r)
+	}
+}
+
+// Follow-up filler is not searched; words that carry a topic are.
+func TestFollowUpFillerIsNotSearched(t *testing.T) {
+	for q, want := range map[string]string{
+		"how is it going?":           "",
+		"Go with item 2":             "",
+		"show me the example":        "",
+		"ok, it makes sense":         "",
+		"how is the build going?":    "build",
+		"is the test suite done?":    "test suite",
+		"run the lean build on fit3": "run lean build fit3",
+	} {
+		if got := strings.Join(queryTerms(q), " "); got != want {
+			t.Errorf("%q: terms %q, want %q", q, got, want)
+		}
+	}
+}
+
+// In a graph of at least min_evidence_nodes neurons, a match on generic
+// words alone does not seed, while one specific term in a long prompt does.
+func TestMinimumEvidence(t *testing.T) {
+	f := newFixture(t)
+	for i := 0; i < 50; i++ {
+		f.add(fmt.Sprint("note", i), model.TypeFact, fmt.Sprintf("Project note %d", i), "use the project tooling", "")
+	}
+	f.add("diseq", model.TypeFact, "remove_irrelevant_constr drops decided disequations", "check relevancy of the atom", "")
+	generic := RecallRequest{Query: "which project tooling should we use", NoRecord: true}
+	if r, _ := f.e.Recall(generic); r.Seeds != 0 {
+		t.Fatalf("generic words seeded: %+v", r.Hits)
+	}
+	long := "I wonder whether the project tooling we use is right, since the remove_irrelevant_constr function looks wrong to me"
+	if r, _ := f.e.Recall(RecallRequest{Query: long, NoRecord: true}); !hitIDs(r)[f.ids["diseq"]].IsSeed {
+		t.Fatalf("the specific term must seed: %+v", r.Hits)
+	}
+	// Below min_evidence_nodes the check is off.
+	if err := f.e.SetParam("min_evidence_nodes", "100"); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := f.e.Recall(generic); r.Seeds == 0 {
+		t.Fatalf("without the check the generic match seeds: %+v", r)
+	}
+}
+
+// With min_evidence_nodes below 10, N/10 rounds to 0; the evidence threshold
+// must still be reachable (idf of a term in one neuron).
+func TestMinimumEvidenceInTinyGraphs(t *testing.T) {
+	f := newFixture(t)
+	if err := f.e.SetParam("min_evidence_nodes", "1"); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := f.e.Recall(RecallRequest{Query: "hebbian learning", NoRecord: true}); !hitIDs(r)[f.ids["hebb"]].IsSeed {
+		t.Fatalf("a term unique to one neuron must seed: %+v", r)
 	}
 }

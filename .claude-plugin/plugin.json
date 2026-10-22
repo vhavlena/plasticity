@@ -1,6 +1,6 @@
 {
   "name": "plasticity",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Brain-like long-term memory for Claude Code: a knowledge graph of neurons (decisions, facts, rationales, procedures) with Hebbian learning and interference-based forgetting. Recalls relevant memories on every prompt.",
   "author": {
     "name": "Vojtěch Havlena"
@@ -59,6 +59,17 @@
       "options": [
         "auto",
         "ollama",
+        "off"
+      ]
+    },
+    "notifications": {
+      "type": "string",
+      "title": "Task notifications",
+      "description": "Recall for task notifications (finished background commands and agents) delivered as prompts: failed: only for failed tasks, on their error output; all: like any prompt; off: never",
+      "default": "failed",
+      "options": [
+        "failed",
+        "all",
         "off"
       ]
     },

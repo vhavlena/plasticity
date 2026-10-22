@@ -60,7 +60,15 @@ type Node struct {
 	Source     string   `json:"source,omitempty"`
 	Importance float64  `json:"importance"`
 	Dormant    bool     `json:"dormant,omitempty"`
-	// Fires counts the recalls in which this neuron was activated. It is the
+	// SupersededBy is the neuron that replaces this one ("" if current). A
+	// superseded neuron is never injected by the prompt hook; recall
+	// redirects its activation to the successor.
+	SupersededBy string `json:"superseded_by,omitempty"`
+	// SuccessorTitle is the title of SupersededBy, filled in for display and
+	// never persisted.
+	SuccessorTitle string `json:"superseded_by_title,omitempty"`
+	// Fires counts the confident recalls in which this neuron was a hit
+	// (recalls below learn_min_confidence do not fire anything). It is the
 	// neuron's own logical clock: synapses age by their endpoints' firings.
 	Fires int64 `json:"fires"`
 	// CreatedTick is the global recall tick at creation (for ACT-R).
@@ -107,6 +115,13 @@ type Edge struct {
 	DstFires      int64     `json:"-"`
 	LastUpdate    time.Time `json:"last_update"` // wall clock, informational
 	Coactivations int       `json:"coactivations"`
+}
+
+// Access is one ACT-R access of a neuron: at a global recall tick, with a
+// weight (1 for a use or creation, recall_access_weight for a recall hit).
+type Access struct {
+	Tick   int64
+	Weight float64
 }
 
 // Age is the number of solo firings of the endpoints since the last update.

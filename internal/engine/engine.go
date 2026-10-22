@@ -37,6 +37,8 @@ type Engine struct {
 	// Warnings collects non-fatal problems (e.g. an unreachable embedder)
 	// for the caller to report.
 	Warnings []string
+
+	projectNorm map[string]string // memoized normProject
 }
 
 // Option customizes an engine at Open.
@@ -141,6 +143,11 @@ func (e *Engine) insertNodes(nodes []*model.Node, vecs []*nodeVector, then func(
 			if err := tx.InsertNode(n); err != nil {
 				return err
 			}
+			// Creation is an access: a new neuron is not ranked (or made
+			// dormant) as one that was never accessed.
+			if err := tx.RecordAccess(n.ID, tick, 1, e.P.MaxAccessRecords); err != nil {
+				return err
+			}
 			if v := vecs[i]; v != nil {
 				if err := tx.PutVector(n.ID, v.model, v.hash, v.blob); err != nil {
 					return err
@@ -163,6 +170,8 @@ type NodePatch struct {
 	Tags       *[]string       `json:"tags,omitempty"`
 	Source     *string         `json:"source,omitempty"`
 	Importance *float64        `json:"importance,omitempty"`
+	// SupersededBy marks the neuron as replaced by another ("" clears it).
+	SupersededBy *string `json:"superseded_by,omitempty"`
 }
 
 // UpdateNode applies a patch.
@@ -197,9 +206,18 @@ func (e *Engine) UpdateNode(id string, p NodePatch) (*model.Node, error) {
 		if err := n.Validate(); err != nil {
 			return err
 		}
+		if p.SupersededBy != nil {
+			if err := supersede(tx, id, *p.SupersededBy); err != nil {
+				return err
+			}
+			n.SupersededBy = *p.SupersededBy
+		}
 		n.UpdatedAt = timestamp()
 		out = n
-		return tx.UpdateNode(n)
+		if err := tx.UpdateNode(n); err != nil {
+			return err
+		}
+		return fillSuccessorTitles(tx, n)
 	})
 	if err != nil {
 		return nil, err
@@ -233,7 +251,18 @@ func (e *Engine) refreshVector(n *model.Node) error {
 
 // DeleteNode removes a node and its synapses.
 func (e *Engine) DeleteNode(id string) error {
-	return e.st.Write(func(tx *store.Tx) error { return tx.DeleteNode(id) })
+	return e.st.Write(func(tx *store.Tx) error {
+		n, err := tx.GetNode(id)
+		if err != nil {
+			return err
+		}
+		// Neurons it superseded now point to its own successor (or are
+		// current again): a dangling mark would hide them for good.
+		if err := tx.RepointSuperseded(id, n.SupersededBy); err != nil {
+			return err
+		}
+		return tx.DeleteNode(id)
+	})
 }
 
 // EdgeView is an edge seen from one node, with its current effective weight.
@@ -267,6 +296,9 @@ func (e *Engine) GetNode(id string) (*NodeView, error) {
 		}
 		now, err := tx.Tick()
 		if err != nil {
+			return err
+		}
+		if err := fillSuccessorTitles(tx, n); err != nil {
 			return err
 		}
 		v = &NodeView{Node: n, Edges: []EdgeView{}}

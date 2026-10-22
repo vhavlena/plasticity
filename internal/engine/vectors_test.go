@@ -248,3 +248,50 @@ func TestEnableOllama(t *testing.T) {
 		t.Fatalf("semantic recall via ollama: %v %+v", err, r)
 	}
 }
+
+// A keyword shared by coincidence seeds only without embeddings: with them,
+// the hit's cosine to the query must corroborate the match.
+func TestLexicalSeedNeedsCorroboration(t *testing.T) {
+	f := newFixture(t, WithEmbedder(conceptEmbedder{}))
+	// "new" occurs in the hooks neuron; the query is about cooking.
+	q := RecallRequest{Query: "new kitchen recipe", NoRecord: true}
+	r, _ := f.e.Recall(q)
+	if _, ok := hitIDs(r)[f.ids["hooks"]]; ok {
+		t.Fatalf("uncorroborated keyword match seeded: %+v", r.Hits)
+	}
+	if h, ok := hitIDs(r)[f.ids["pasta"]]; !ok || !h.IsSeed {
+		t.Fatalf("the semantic match must still seed: %+v", r.Hits)
+	}
+	if r.LexicalConfidence != 0 {
+		t.Fatalf("lexical confidence of a coincidental match: %g", r.LexicalConfidence)
+	}
+	// A corroborated keyword match keeps its full strength.
+	if r, _ := f.e.Recall(RecallRequest{Query: "sqlite storage", NoRecord: true}); r.LexicalConfidence != 1 || !hitIDs(r)[f.ids["sqlite"]].IsSeed {
+		t.Fatalf("corroborated match: %+v", r)
+	}
+	// lexical_cos_high = 0 turns the check off.
+	if err := f.e.SetParam("lexical_cos_high", "0"); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := f.e.Recall(q); !hitIDs(r)[f.ids["hooks"]].IsSeed {
+		t.Fatalf("without the check the keyword match seeds: %+v", r.Hits)
+	}
+}
+
+// With embeddings, co-use within the task window links only semantically
+// related neurons: a topic switch inside the window links nothing.
+func TestCoUseWindowNeedsRelatedEmbeddings(t *testing.T) {
+	f := newFixture(t, WithEmbedder(conceptEmbedder{}))
+	f.e.StartSession("S", "/repo", "startup")
+	f.e.NotePrompt("S", "/repo", "storage")
+	if _, err := f.e.Used("S", []string{f.ids["sqlite"]}); err != nil {
+		t.Fatal(err)
+	}
+	f.e.NotePrompt("S", "/repo", "dinner")
+	if rep, err := f.e.Used("S", []string{f.ids["pasta"]}); err != nil || rep.WindowPairs != 0 || f.weight("sqlite", "pasta") != 0 {
+		t.Fatalf("unrelated neurons linked by co-use: %v %+v", err, rep)
+	}
+	if rep, err := f.e.Used("S", []string{f.ids["badger"]}); err != nil || rep.WindowPairs != 1 || f.weight("sqlite", "badger") == 0 {
+		t.Fatalf("related neurons should be linked: %v %+v", err, rep)
+	}
+}

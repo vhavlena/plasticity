@@ -116,7 +116,7 @@ func tagsJSON(tags []string) string {
 
 // ---------------------------------------------------------------- nodes
 
-const nodeCols = `id, type, title, content, rationale, tags, source, importance, dormant, fires, created_tick, created_at, updated_at`
+const nodeCols = `id, type, title, content, rationale, tags, source, importance, dormant, superseded_by, fires, created_tick, created_at, updated_at`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -127,7 +127,7 @@ func scanNode(r scanner, extra ...any) (*model.Node, error) {
 	var dormant int
 	var created, updated int64
 	dest := append([]any{&n.ID, &n.Type, &n.Title, &n.Content, &n.Rationale, &tags, &n.Source,
-		&n.Importance, &dormant, &n.Fires, &n.CreatedTick, &created, &updated}, extra...)
+		&n.Importance, &dormant, &n.SupersededBy, &n.Fires, &n.CreatedTick, &created, &updated}, extra...)
 	if err := r.Scan(dest...); err != nil {
 		return nil, err
 	}
@@ -142,7 +142,7 @@ func scanNode(r scanner, extra ...any) (*model.Node, error) {
 // FindTitle returns the first node, shortest title first, whose title
 // matches the LIKE pattern (escape character \) and satisfies same; nil if
 // none does.
-func (t *Tx) FindTitle(pattern string, same func(title string) bool) (*model.Node, error) {
+func (t *Tx) FindTitle(pattern string, same func(n *model.Node) bool) (*model.Node, error) {
 	rows, err := t.tx.Query(`SELECT `+nodeCols+` FROM nodes WHERE title LIKE ? ESCAPE '\' ORDER BY length(title)`, pattern)
 	if err != nil {
 		return nil, err
@@ -153,7 +153,7 @@ func (t *Tx) FindTitle(pattern string, same func(title string) bool) (*model.Nod
 		if err != nil {
 			return nil, err
 		}
-		if same(n.Title) {
+		if same(n) {
 			return n, nil
 		}
 	}
@@ -162,18 +162,18 @@ func (t *Tx) FindTitle(pattern string, same func(title string) bool) (*model.Nod
 
 // InsertNode adds a new node.
 func (t *Tx) InsertNode(n *model.Node) error {
-	_, err := t.tx.Exec(`INSERT INTO nodes (`+nodeCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := t.tx.Exec(`INSERT INTO nodes (`+nodeCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		n.ID, n.Type, n.Title, n.Content, n.Rationale, tagsJSON(n.Tags), n.Source,
-		n.Importance, b2i(n.Dormant), n.Fires, n.CreatedTick, ts(n.CreatedAt), ts(n.UpdatedAt))
+		n.Importance, b2i(n.Dormant), n.SupersededBy, n.Fires, n.CreatedTick, ts(n.CreatedAt), ts(n.UpdatedAt))
 	return err
 }
 
 // UpdateNode overwrites all mutable fields of an existing node.
 func (t *Tx) UpdateNode(n *model.Node) error {
 	res, err := t.tx.Exec(`UPDATE nodes SET type=?, title=?, content=?, rationale=?, tags=?, source=?,
-		importance=?, dormant=?, updated_at=? WHERE id=?`,
+		importance=?, dormant=?, superseded_by=?, updated_at=? WHERE id=?`,
 		n.Type, n.Title, n.Content, n.Rationale, tagsJSON(n.Tags), n.Source,
-		n.Importance, b2i(n.Dormant), ts(n.UpdatedAt), n.ID)
+		n.Importance, b2i(n.Dormant), n.SupersededBy, ts(n.UpdatedAt), n.ID)
 	if err != nil {
 		return err
 	}
@@ -181,6 +181,25 @@ func (t *Tx) UpdateNode(n *model.Node) error {
 		return fmt.Errorf("node %s: %w", n.ID, ErrNotFound)
 	}
 	return nil
+}
+
+// SetSupersededBy records that id is replaced by successor ("" clears it).
+func (t *Tx) SetSupersededBy(id, successor string) error {
+	res, err := t.tx.Exec(`UPDATE nodes SET superseded_by=? WHERE id=?`, successor, id)
+	if err != nil {
+		return err
+	}
+	if k, _ := res.RowsAffected(); k == 0 {
+		return fmt.Errorf("node %s: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// RepointSuperseded makes the neurons superseded by old superseded by
+// successor instead ("" makes them current).
+func (t *Tx) RepointSuperseded(old, successor string) error {
+	_, err := t.tx.Exec(`UPDATE nodes SET superseded_by = ? WHERE superseded_by = ?`, successor, old)
+	return err
 }
 
 // SetDormant updates the dormancy flag.
@@ -474,10 +493,10 @@ func (t *Tx) Fire(ids []string) error {
 
 // ---------------------------------------------------------------- accesses
 
-// RecordAccess appends an access at the given recall tick and keeps only the
-// newest max accesses.
-func (t *Tx) RecordAccess(id string, tick int64, max int) error {
-	if _, err := t.tx.Exec(`INSERT INTO node_access (node_id, tick) VALUES (?, ?)`, id, tick); err != nil {
+// RecordAccess appends an access of the given weight at the given recall
+// tick and keeps only the newest max accesses.
+func (t *Tx) RecordAccess(id string, tick int64, weight float64, max int) error {
+	if _, err := t.tx.Exec(`INSERT INTO node_access (node_id, tick, weight) VALUES (?, ?, ?)`, id, tick, weight); err != nil {
 		return err
 	}
 	_, err := t.tx.Exec(`DELETE FROM node_access WHERE node_id = ? AND rowid NOT IN (
@@ -485,22 +504,22 @@ func (t *Tx) RecordAccess(id string, tick int64, max int) error {
 	return err
 }
 
-// Accesses returns the access ticks of the given nodes.
-func (t *Tx) Accesses(ids []string) (map[string][]int64, error) {
-	out := map[string][]int64{}
+// Accesses returns the accesses of the given nodes.
+func (t *Tx) Accesses(ids []string) (map[string][]model.Access, error) {
+	out := map[string][]model.Access{}
 	for _, chunk := range chunks(ids, 500) {
-		rows, err := t.tx.Query(`SELECT node_id, tick FROM node_access WHERE node_id IN (`+placeholders(len(chunk))+`)`, anys(chunk)...)
+		rows, err := t.tx.Query(`SELECT node_id, tick, weight FROM node_access WHERE node_id IN (`+placeholders(len(chunk))+`)`, anys(chunk)...)
 		if err != nil {
 			return nil, err
 		}
 		for rows.Next() {
 			var id string
-			var v int64
-			if err := rows.Scan(&id, &v); err != nil {
+			var a model.Access
+			if err := rows.Scan(&id, &a.Tick, &a.Weight); err != nil {
 				rows.Close()
 				return nil, err
 			}
-			out[id] = append(out[id], v)
+			out[id] = append(out[id], a)
 		}
 		if err := rows.Close(); err != nil {
 			return nil, err
@@ -727,6 +746,32 @@ func (t *Tx) VectorHash(id, model string) (string, error) {
 	return h, err
 }
 
+// Vectors returns the stored vectors of the given nodes under model (nodes
+// without one are absent).
+func (t *Tx) Vectors(model string, ids []string) (map[string][]byte, error) {
+	out := map[string][]byte{}
+	for _, chunk := range chunks(ids, 500) {
+		rows, err := t.tx.Query(`SELECT node_id, vec FROM node_vectors WHERE model = ? AND node_id IN (`+placeholders(len(chunk))+`)`,
+			append([]any{model}, anys(chunk)...)...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id string
+			var vec []byte
+			if err := rows.Scan(&id, &vec); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[id] = vec
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 // ScanVectors calls fn for every stored vector of the given model.
 func (t *Tx) ScanVectors(model string, fn func(id string, vec []byte) error) error {
 	rows, err := t.tx.Query(`SELECT node_id, vec FROM node_vectors WHERE model = ?`, model)
@@ -936,22 +981,115 @@ func (t *Tx) CountEndedSessions() (int, error) {
 	return n, err
 }
 
-// AddSessionNodes records neurons a session used or created.
+// AddSessionNodes records neurons a session used or created, at the
+// session's current prompt count (a neuron recorded again moves to the later
+// prompt).
 func (t *Tx) AddSessionNodes(session, role string, ids []string, at time.Time) error {
 	for i, id := range ids {
-		if _, err := t.tx.Exec(`INSERT INTO session_nodes (session, node_id, role, ts) VALUES (?, ?, ?, ?)
-			ON CONFLICT DO NOTHING`, session, id, role, ts(at)+int64(i)); err != nil {
+		var seen int
+		if err := t.tx.QueryRow(`SELECT count(*) FROM session_nodes WHERE session = ? AND node_id = ? AND role = ?`,
+			session, id, role).Scan(&seen); err != nil {
+			return err
+		}
+		if seen == 0 && (role == "created" || role == "used") {
+			if err := t.notePresenceInSessionProject(session, id, role == "created"); err != nil {
+				return err
+			}
+		}
+		if _, err := t.tx.Exec(`INSERT INTO session_nodes (session, node_id, role, ts, prompt_no)
+			VALUES (?, ?, ?, ?, coalesce((SELECT prompts FROM sessions WHERE id = ?), 0))
+			ON CONFLICT DO UPDATE SET prompt_no = max(prompt_no, excluded.prompt_no)`,
+			session, id, role, ts(at)+int64(i), session); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// notePresenceInSessionProject records that node was created (or once more
+// used) in the project of session, if the session has one.
+func (t *Tx) notePresenceInSessionProject(session, node string, created bool) error {
+	var project string
+	err := t.tx.QueryRow(`SELECT project FROM sessions WHERE id = ?`, session).Scan(&project)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && project == "" {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	uses := 1
+	if created {
+		uses = 0
+	}
+	return t.AddNodeProject(node, project, created, uses)
+}
+
+// AddNodeProject records that node was created in project (created) and/or
+// used there uses more times.
+func (t *Tx) AddNodeProject(node, project string, created bool, uses int) error {
+	_, err := t.tx.Exec(`INSERT INTO node_projects (node_id, project, created, uses) VALUES (?, ?, ?, ?)
+		ON CONFLICT DO UPDATE SET created = max(created, excluded.created), uses = uses + excluded.uses`,
+		node, project, b2i(created), uses)
+	return err
+}
+
+// NodeProject is one project a neuron belongs to.
+type NodeProject struct {
+	Project string `json:"project"`
+	Created bool   `json:"created"`
+	Uses    int    `json:"uses"`
+}
+
+// NodeProjects returns the projects of the given neurons (neurons without
+// any are absent).
+func (t *Tx) NodeProjects(ids []string) (map[string][]NodeProject, error) {
+	out := map[string][]NodeProject{}
+	for _, chunk := range chunks(ids, 500) {
+		rows, err := t.tx.Query(`SELECT node_id, project, created, uses FROM node_projects WHERE node_id IN (`+
+			placeholders(len(chunk))+`) ORDER BY node_id, project`, anys(chunk)...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id string
+			var p NodeProject
+			var created int
+			if err := rows.Scan(&id, &p.Project, &created, &p.Uses); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			p.Created = created != 0
+			out[id] = append(out[id], p)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// SessionPaired reports whether a and b could have been joined by a context
+// link: one of them was created (or is the episode) in a session in which
+// the other was used or created.
+func (t *Tx) SessionPaired(a, b string) (bool, error) {
+	var n int
+	err := t.tx.QueryRow(`SELECT count(*) FROM session_nodes x JOIN session_nodes y ON x.session = y.session
+		WHERE x.role IN ('created', 'episode') AND y.role IN ('used', 'created')
+		AND ((x.node_id = ? AND y.node_id = ?) OR (x.node_id = ? AND y.node_id = ?))`, a, b, b, a).Scan(&n)
+	return n > 0, err
+}
+
 // SessionNodes returns the neurons a session recorded under the given roles,
 // oldest first, without duplicates.
 func (t *Tx) SessionNodes(session string, roles ...string) ([]string, error) {
+	return t.SessionNodesSince(session, 0, roles...)
+}
+
+// SessionNodesSince is SessionNodes restricted to neurons recorded at prompt
+// minPrompt or later.
+func (t *Tx) SessionNodesSince(session string, minPrompt int, roles ...string) ([]string, error) {
 	rows, err := t.tx.Query(`SELECT node_id FROM session_nodes WHERE session = ? AND role IN (`+placeholders(len(roles))+`)
-		GROUP BY node_id ORDER BY min(ts)`, append([]any{session}, anys(roles)...)...)
+		GROUP BY node_id HAVING max(prompt_no) >= ? ORDER BY min(ts)`, append(append([]any{session}, anys(roles)...), minPrompt)...)
 	if err != nil {
 		return nil, err
 	}

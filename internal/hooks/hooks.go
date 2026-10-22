@@ -62,6 +62,16 @@ type Config struct {
 	// ContextBudget caps the injected characters per prompt (Claude Code
 	// truncates additional context above 10,000 characters).
 	ContextBudget int
+	// Notifications selects which task notifications are recalled (see
+	// PlanRecall): NotifyFailed, NotifyAll (as plain prompts) or NotifyOff.
+	Notifications string
+	// Task notifications (see PlanRecall): only failed tasks are recalled,
+	// with at most NotificationLimit hits (0: RecallLimit), only when the query confidence
+	// reaches NotificationMinConfidence, on at most NotificationMaxChars
+	// characters of description and error output.
+	NotificationLimit         int
+	NotificationMinConfidence float64
+	NotificationMaxChars      int
 	// DB is the graph the hook opened. Commands Claude runs through Bash see
 	// neither the plugin options nor the session's cwd, so the commands the
 	// hooks suggest name this graph (and the log option) explicitly (see CLI).
@@ -87,10 +97,16 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// DefaultConfig returns the plugin options' defaults.
+func DefaultConfig() Config {
+	return Config{Scope: "global", RecallLimit: 6, Reflect: true, Log: true, Embeddings: "auto", ContextBudget: 3000,
+		SessionIdle: 48 * time.Hour, Notifications: NotifyFailed, NotificationLimit: 0, NotificationMinConfidence: 0.6, NotificationMaxChars: 600}
+}
+
 // ConfigFromEnv reads CLAUDE_PLUGIN_OPTION_<KEY> (as declared or upper-case),
 // with PLASTICITY_<KEY> overrides for use outside the plugin.
 func ConfigFromEnv() Config {
-	c := Config{Scope: "global", RecallLimit: 6, Reflect: true, Log: true, Embeddings: "auto", ContextBudget: 3000, SessionIdle: 48 * time.Hour}
+	c := DefaultConfig()
 	get := func(key string) (string, bool) {
 		for _, k := range []string{"PLASTICITY_" + strings.ToUpper(key), "CLAUDE_PLUGIN_OPTION_" + strings.ToUpper(key), "CLAUDE_PLUGIN_OPTION_" + key} {
 			if v, ok := os.LookupEnv(k); ok && strings.TrimSpace(v) != "" {
@@ -123,6 +139,27 @@ func ConfigFromEnv() Config {
 	}
 	if v, ok := get("embeddings"); ok {
 		c.Embeddings = strings.ToLower(v)
+	}
+	if v, ok := get("notifications"); ok {
+		switch v = strings.ToLower(v); v {
+		case NotifyFailed, NotifyAll, NotifyOff:
+			c.Notifications = v
+		}
+	}
+	if v, ok := get("notification_limit"); ok {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.NotificationLimit = n
+		}
+	}
+	if v, ok := get("notification_min_confidence"); ok {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 && f <= 1 {
+			c.NotificationMinConfidence = f
+		}
+	}
+	if v, ok := get("notification_max_chars"); ok {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.NotificationMaxChars = n
+		}
 	}
 	return c
 }
@@ -163,7 +200,9 @@ Run every plasticity command as %s ... (it selects this session's memory).
   %s recall "<specific question or error>" --session %s
 - Store durable knowledge (decisions with rationale, root causes, working procedures, preferences):
   %s add -t decision|fact|procedure|concept|rationale|question --title "..." -c "..." -r "why" --importance 0..1 --session %s
-  (importance: 0.8-1 user preferences/corrections and costly decisions or root causes, 0.4-0.7 useful facts and procedures, 0.1-0.3 minor details)
+  (importance, always pass it, the CLI warns if omitted: 0.8-1 user preferences/corrections and costly decisions or root causes, 0.4-0.7 useful facts and procedures, 0.1-0.3 minor details;
+  add --supersedes OLD_ID when the new neuron replaces an outdated one;
+  --tags global for knowledge shared across projects: preferences, tool tips, shared infrastructure)
 - Report memories you actually used (also ones you found via plasticity search/recall):
   %s used --session %s ID [ID...]
 Use the plasticity:memory skill for guidance.`, st.Nodes, cfg.Scope, search, id, cli, cli, id, cli, id, cli, id)
@@ -193,33 +232,39 @@ func CloseAbandoned(e *engine.Engine, cfg Config, limit int) (int, error) {
 	return closed, nil
 }
 
-// trivial reports prompts that need no recall: slash commands and very
-// short inputs (acknowledgements).
-func trivial(prompt string) bool {
-	p := strings.TrimSpace(prompt)
-	return strings.HasPrefix(p, "/") || len(strings.Fields(p)) < 3
-}
-
-// Prompt recalls memories for the user's prompt and injects them.
+// Prompt recalls memories for the user's prompt and injects them (see
+// PlanRecall for which prompts are recalled and how).
 func Prompt(e *engine.Engine, in Input, project string, cfg Config) (*Output, error) {
-	if err := e.NotePrompt(in.SessionID, project, in.Prompt); err != nil {
+	plan := cfg.PlanRecall(in.Prompt, ReadOutputTail)
+	source := engine.RecallSourcePrompt
+	if plan.Kind == KindNotification {
+		source = engine.RecallSourceNotification
+		if err := e.NoteNotification(in.SessionID, project, in.Prompt); err != nil {
+			return nil, err
+		}
+	} else if err := e.NotePrompt(in.SessionID, project, in.Prompt); err != nil {
 		return nil, err
 	}
-	if trivial(in.Prompt) {
+	if plan.Skip {
 		return nil, nil
+	}
+	limit := cfg.RecallLimit
+	if plan.Limit > 0 {
+		limit = min(limit, plan.Limit)
 	}
 	start := time.Now()
 	// Episodes quote raw prompts: they match many queries lexically and would
 	// crowd knowledge out of the few injected slots. They stay reachable
-	// through explicit recall and search.
-	r, err := e.Recall(engine.RecallRequest{Query: in.Prompt, Session: in.SessionID, Limit: cfg.RecallLimit,
-		ExcludeTypes: []model.NodeType{model.TypeEpisode}})
+	// through explicit recall and search. Superseded neurons are never
+	// injected; their successors are, in their place.
+	r, err := e.Recall(engine.RecallRequest{Query: plan.Query, Session: in.SessionID, Project: project, Limit: limit,
+		MinConfidence: plan.MinConfidence, ExcludeTypes: []model.NodeType{model.TypeEpisode}, ExcludeSuperseded: true, Auto: true})
 	if err != nil {
 		return nil, err
 	}
 	latency := time.Since(start)
 	text := FormatMemories(r, in.SessionID, cfg.CLI(), cfg.ContextBudget)
-	e.LogRecall(in.SessionID, engine.RecallSourcePrompt, in.Prompt, r, latency, len(text))
+	e.LogRecall(in.SessionID, source, plan.Query, r, latency, len(text))
 	if text == "" {
 		return nil, nil
 	}
@@ -244,7 +289,9 @@ func FormatMemories(r *engine.RecallResult, session, cli string, budget int) str
 		if n.Rationale != "" {
 			line += " Why: " + truncate(n.Rationale, 140)
 		}
-		if !h.IsSeed && len(h.PathTitles) > 1 {
+		if len(h.Supersedes) > 0 {
+			line += fmt.Sprintf(" (supersedes: %q)", truncate(strings.Join(h.Supersedes, "; "), 80))
+		} else if !h.IsSeed && len(h.PathTitles) > 1 {
 			line += fmt.Sprintf(" (associated via %q)", truncate(h.PathTitles[len(h.PathTitles)-2], 60))
 		}
 		line += "\n"

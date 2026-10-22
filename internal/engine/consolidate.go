@@ -140,7 +140,7 @@ func (e *Engine) updateDormancy(tx *store.Tx, ids []string, degree map[string]in
 	}
 	for _, id := range ids {
 		n := nodes[id]
-		b := plasticity.BaseLevel(append(acc[id], n.CreatedTick), now, e.P.ActrDecay)
+		b := plasticity.BaseLevel(acc[id], now, e.P.ActrDecay) // creation is an access
 		dormant := degree[id] == 0 && b < e.P.DormantBelow
 		if dormant == n.Dormant {
 			continue
@@ -182,7 +182,10 @@ func (e *Engine) Export(w io.Writer, format string) error {
 		return enc.Encode(map[string]any{"version": version.String(), "exported_at": now, "nodes": nodes, "edges": edges})
 	}
 	if format == "html" {
-		return viz.Write(w, map[string]any{"version": version.String(), "exported_at": now, "nodes": nodes, "edges": edges})
+		// An associative edge below firing_threshold / hop_decay cannot carry
+		// activation on its own; the page draws such tentative links dashed.
+		return viz.Write(w, map[string]any{"version": version.String(), "exported_at": now, "nodes": nodes, "edges": edges,
+			"propagation_weight": e.P.FiringThreshold / e.P.HopDecay})
 	}
 	return writeDOT(w, nodes, edges)
 }

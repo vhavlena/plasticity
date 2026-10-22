@@ -21,6 +21,50 @@ type QueryMetrics struct {
 	AssocTotal int  `json:"assoc_total"`
 	AssocFound int  `json:"assoc_found"`
 	Empty      bool `json:"empty"`
+	// Unlabeled queries (empty relevant set) should recall nothing.
+	Unlabeled bool `json:"unlabeled,omitempty"`
+	// Irrelevant hits are those not in the relevant set.
+	Irrelevant int `json:"irrelevant"`
+	// CrossProject hits are irrelevant hits from another project than the
+	// session's (both known).
+	CrossProject int `json:"cross_project"`
+	// StaleHits are hits labeled stale; StaleFirst: a stale hit ranks above
+	// every relevant hit (the superseded answer is the one read first).
+	StaleLabels int  `json:"stale_labels,omitempty"`
+	StaleHits   int  `json:"stale_hits"`
+	StaleFirst  bool `json:"stale_first,omitempty"`
+}
+
+// noise fills the noise metrics of a recall in a session of the given
+// project.
+func (m *QueryMetrics) noise(hits []string, q Query, sessProject string, project map[string]string) {
+	m.Unlabeled, m.StaleLabels = len(q.Relevant) == 0, len(q.Stale)
+	rel, stale := set(q.Relevant), set(q.Stale)
+	sawRelevant := false
+	for _, h := range hits {
+		if rel[h] {
+			sawRelevant = true
+			continue
+		}
+		m.Irrelevant++
+		if p := project[h]; p != "" && sessProject != "" && p != sessProject {
+			m.CrossProject++
+		}
+		if stale[h] {
+			m.StaleHits++
+			if !sawRelevant && m.StaleHits == 1 {
+				m.StaleFirst = true
+			}
+		}
+	}
+}
+
+func set(keys []string) map[string]bool {
+	out := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		out[k] = true
+	}
+	return out
 }
 
 // score computes metrics for a ranked list of hit keys.
@@ -50,7 +94,9 @@ func score(hits []string, relevant []string, assoc map[string]bool) QueryMetrics
 	for i := 0; i < min(len(rel), max(len(hits), 1)); i++ {
 		ideal += 1 / math.Log2(float64(i+2))
 	}
-	m.Recall = float64(found) / float64(len(rel))
+	if len(rel) > 0 {
+		m.Recall = float64(found) / float64(len(rel))
+	}
 	if len(hits) > 0 {
 		m.Precision = float64(found) / float64(len(hits))
 	}
@@ -119,6 +165,22 @@ type Aggregate struct {
 	AssocRecall float64 `json:"assoc_recall"` // found / total over associative relevant nodes
 	EmptyRate   float64 `json:"empty_rate"`
 	TraceRate   float64 `json:"trace_rate"` // share of recalls that stored a learning trace
+	// Labeled queries have relevant nodes; recall, precision, MRR, nDCG,
+	// assoc-recall and the empty rate are means over them only.
+	Labeled int `json:"labeled"`
+	// NoiseRate: share of unlabeled queries that recalled anything.
+	NoiseRate float64 `json:"noise_rate"`
+	// HitsPerRecall: mean hits per query (skipped queries count as 0).
+	HitsPerRecall float64 `json:"hits_per_recall"`
+	// IrrelevantShare and CrossProjectShare: shares of all hits.
+	IrrelevantShare   float64 `json:"irrelevant_share"`
+	CrossProjectShare float64 `json:"cross_project_share"`
+	// StaleRate and StaleFirstRate: shares of queries with stale labels that
+	// recalled a stale node / ranked it above every relevant one.
+	StaleQueries   int     `json:"stale_queries"`
+	StaleRate      float64 `json:"stale_rate"`
+	StaleFirstRate float64 `json:"stale_first_rate"`
+	SkippedRate    float64 `json:"skipped_rate"` // share filtered by the prompt hook
 }
 
 func aggregate(rs []QueryResult) Aggregate {
@@ -127,7 +189,34 @@ func aggregate(rs []QueryResult) Aggregate {
 		return a
 	}
 	assocT, assocF := 0, 0
+	unlabeled, noisy, hits, irrelevant, cross := 0, 0, 0, 0, 0
 	for _, r := range rs {
+		hits += len(r.Hits)
+		irrelevant += r.Metrics.Irrelevant
+		cross += r.Metrics.CrossProject
+		if r.Skipped {
+			a.SkippedRate++
+		}
+		if r.Traced {
+			a.TraceRate++
+		}
+		if r.Metrics.StaleLabels > 0 {
+			a.StaleQueries++
+			if r.Metrics.StaleHits > 0 {
+				a.StaleRate++
+			}
+			if r.Metrics.StaleFirst {
+				a.StaleFirstRate++
+			}
+		}
+		if r.Metrics.Unlabeled {
+			unlabeled++
+			if len(r.Hits) > 0 {
+				noisy++
+			}
+			continue
+		}
+		a.Labeled++
 		a.Recall += r.Metrics.Recall
 		a.Precision += r.Metrics.Precision
 		a.MRR += r.Metrics.RR
@@ -137,17 +226,29 @@ func aggregate(rs []QueryResult) Aggregate {
 		if r.Metrics.Empty {
 			a.EmptyRate++
 		}
-		if r.Traced {
-			a.TraceRate++
-		}
 	}
 	n := float64(len(rs))
-	a.Recall /= n
-	a.Precision /= n
-	a.MRR /= n
-	a.NDCG /= n
-	a.EmptyRate /= n
 	a.TraceRate /= n
+	a.SkippedRate /= n
+	a.HitsPerRecall = float64(hits) / n
+	if l := float64(a.Labeled); l > 0 {
+		a.Recall /= l
+		a.Precision /= l
+		a.MRR /= l
+		a.NDCG /= l
+		a.EmptyRate /= l
+	}
+	if unlabeled > 0 {
+		a.NoiseRate = float64(noisy) / float64(unlabeled)
+	}
+	if hits > 0 {
+		a.IrrelevantShare = float64(irrelevant) / float64(hits)
+		a.CrossProjectShare = float64(cross) / float64(hits)
+	}
+	if a.StaleQueries > 0 {
+		a.StaleRate /= float64(a.StaleQueries)
+		a.StaleFirstRate /= float64(a.StaleQueries)
+	}
 	if assocT > 0 {
 		a.AssocRecall = float64(assocF) / float64(assocT)
 	}
