@@ -248,7 +248,7 @@ func TestUsageNotifications(t *testing.T) {
 	l.prompt("S", "how do we store the graph", 0.9, "A")
 	l.prompt("S", "<task-notification>\n<status>completed</status>\n</task-notification>", 0.5, "B", "C") // legacy
 	l.add("S", engine.EventNotification, map[string]string{"text": "<task-notification>..."})
-	l.add("S", engine.EventRecall, map[string]any{"source": engine.RecallSourceNotification, "query": "run_analysis.py cannot locate tool",
+	l.add("S", engine.EventRecall, map[string]any{"source": engine.RecallSourceNotification, "query": "run_bench.py cannot locate tool",
 		"hits": []map[string]any{{"id": "P"}}, "confidence": 0.8})
 	u := AnalyzeUsage(l.evs)
 	if u.Prompts != 1 || u.Notifications != 2 {
@@ -269,7 +269,7 @@ func TestUsageNotifications(t *testing.T) {
 func TestExportPlannedNotification(t *testing.T) {
 	l := &eventLog{}
 	l.add("S", engine.EventRecall, map[string]any{"source": engine.RecallSourceNotification,
-		"query": "run_analysis failed: cannot locate VeriRego tool(s)", "hits": []map[string]any{{"id": "A"}}, "confidence": 0.7})
+		"query": "run_bench failed: cannot locate analyzer tool(s)", "hits": []map[string]any{{"id": "A"}}, "confidence": 0.7})
 	l.used("S", 0, "A")
 	nodes := []*model.Node{{ID: "A", Type: model.TypeFact, Title: "node A"}}
 	s, _, err := ExportSessions(l.evs, nodes, nil, ExportOptions{})

@@ -14,7 +14,7 @@ import (
 const (
 	notifDone = `<task-notification>
 <task-id>beeaj2ueu</task-id>
-<tool-use-id>toolu_01GMZCVLizzwrSzrb4uVtco2</tool-use-id>
+<tool-use-id>toolu_01AbCdEfGhIjKlMnOpQrStUv</tool-use-id>
 <output-file>/private/tmp/claude-501/x/0dd3b131/tasks/beeaj2ueu.output</output-file>
 <status>completed</status>
 <summary>Background command "Wait for full build" completed (exit code 0)</summary>
@@ -28,16 +28,16 @@ const (
 </task-notification>`
 	notifMonitor = `<task-notification>
 <task-id>b88aau0ei</task-id>
-<summary>Monitor event: "strict-bj results: norm-only vs full fix-sat-handling on verifit3"</summary>
-<event>norm-only 7: timeout  :final-checks 928</event>
+<summary>Monitor event: "benchmark results: baseline vs patched on buildhost"</summary>
+<event>baseline 7: timeout  checks 928</event>
 If this event is something the user would act on now, send a PushNotification.
 </task-notification>`
 	notifFailed = `<task-notification>
 <task-id>bsuv0wncx</task-id>
-<tool-use-id>toolu_016Wsr6Emu8CtJ4ZTsdGdR2B</tool-use-id>
+<tool-use-id>toolu_01WxYzAbCdEfGhIjKlMnOpQr</tool-use-id>
 <output-file>%OUT%</output-file>
 <status>failed</status>
-<summary>Background command "cd ~/verirego-bench/bench &amp;&amp; ./run_analysis.py ../input/weave-examples.input --config verirego" failed with exit code 1</summary>
+<summary>Background command "cd ~/bench-suite/bench &amp;&amp; ./run_bench.py ../input/examples.input --config fast" failed with exit code 1</summary>
 </task-notification>`
 )
 
@@ -58,7 +58,7 @@ func TestPlanRecall(t *testing.T) {
 	}
 
 	out := filepath.Join(t.TempDir(), "bsuv0wncx.output")
-	if err := os.WriteFile(out, []byte(strings.Repeat("progress line\n", 500)+"error: cannot locate VeriRego tool(s): analyses\n[exited with code 1]\n"), 0o644); err != nil {
+	if err := os.WriteFile(out, []byte(strings.Repeat("progress line\n", 500)+"error: cannot locate analyzer tool(s): checks\n[exited with code 1]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	failed := strings.ReplaceAll(notifFailed, "%OUT%", out)
@@ -66,12 +66,12 @@ func TestPlanRecall(t *testing.T) {
 	if p.Skip || p.Kind != KindNotification || p.Limit != 0 || p.MinConfidence != 0.6 {
 		t.Fatalf("failed notification: %+v", p)
 	}
-	for _, want := range []string{"cannot locate VeriRego tool(s): analyses", "run_analysis.py", "--config verirego"} {
+	for _, want := range []string{"cannot locate analyzer tool(s): checks", "run_bench.py", "--config fast"} {
 		if !strings.Contains(p.Query, want) {
 			t.Fatalf("query lacks %q: %q", want, p.Query)
 		}
 	}
-	for _, noise := range []string{"/private/tmp", "toolu_", "<status>", "&amp;", "exit code", "Background command", "~/verirego-bench"} {
+	for _, noise := range []string{"/private/tmp", "toolu_", "<status>", "&amp;", "exit code", "Background command", "~/bench-suite"} {
 		if strings.Contains(p.Query, noise) {
 			t.Fatalf("query keeps noise %q: %q", noise, p.Query)
 		}
@@ -80,7 +80,7 @@ func TestPlanRecall(t *testing.T) {
 		t.Fatalf("query of %d chars exceeds the budget", n)
 	}
 	// Without the output file only the description is recalled.
-	if p := c.PlanRecall(failed, nil); p.Skip || !strings.Contains(p.Query, "run_analysis.py") || strings.Contains(p.Query, "cannot locate") {
+	if p := c.PlanRecall(failed, nil); p.Skip || !strings.Contains(p.Query, "run_bench.py") || strings.Contains(p.Query, "cannot locate") {
 		t.Fatalf("failed notification without output: %+v", p)
 	}
 	killed := `<task-notification>
@@ -128,8 +128,8 @@ func TestPromptHookNotifications(t *testing.T) {
 	e := newEngine(t)
 	cfg := DefaultConfig()
 	cfg.Embeddings = "off"
-	add(t, e, "verifit3 VeriRego experiment pitfalls",
-		"Without source ~/.profile inside the screen job, run_analysis.py fails with cannot locate VeriRego tool(s): analyses")
+	add(t, e, "Benchmark server experiment pitfalls",
+		"Without sourcing the shell profile in the batch job, run_bench.py fails with cannot locate analyzer tool(s): checks")
 	add(t, e, "Graph visualization: self-contained HTML", "plasticity viz renders the build output page")
 	if _, err := SessionStart(e, Input{SessionID: "S", Source: "startup"}, "/repo", cfg); err != nil {
 		t.Fatal(err)
@@ -138,7 +138,7 @@ func TestPromptHookNotifications(t *testing.T) {
 		t.Fatalf("successful notification injected: %v %+v", err, out)
 	}
 	out := filepath.Join(t.TempDir(), "b.output")
-	os.WriteFile(out, []byte("Traceback ...\nerror: cannot locate VeriRego tool(s): analyses\n"), 0o644)
+	os.WriteFile(out, []byte("Traceback ...\nerror: cannot locate analyzer tool(s): checks\n"), 0o644)
 	res, err := Prompt(e, Input{SessionID: "S", Prompt: strings.ReplaceAll(notifFailed, "%OUT%", out)}, "/repo", cfg)
 	if err != nil || res == nil || !strings.Contains(res.Specific.AdditionalContext, "experiment pitfalls") {
 		t.Fatalf("failed notification must recall the pitfall: %v %+v", err, res)
