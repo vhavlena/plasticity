@@ -1,9 +1,12 @@
 package engine
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/vhavlena/plasticity/internal/model"
+	"github.com/vhavlena/plasticity/internal/paths"
 	"github.com/vhavlena/plasticity/internal/store"
 )
 
@@ -76,5 +79,32 @@ func TestProjectAffinityScalesForeignSeeds(t *testing.T) {
 	f.e.StartSession("S", "/me", "startup")
 	if s := seeds(RecallRequest{Query: "sqlite badger lock", Session: "S", Auto: true}); !approx(s[f.ids["badger"]], auto[f.ids["badger"]]) {
 		t.Fatalf("session project not used: %g", s[f.ids["badger"]])
+	}
+}
+
+// Project records written under a path that now resolves differently (a
+// symlink to the repository) still count as the recall's project.
+func TestStoredProjectPathsAreNormalized(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(repo, link); err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t)
+	if err := f.e.NoteNodeProject(f.ids["badger"], link, true, 0); err != nil { // recorded before resolution
+		t.Fatal(err)
+	}
+	var foreign map[string]bool
+	_ = f.e.st.Read(func(tx *store.Tx) error {
+		var err error
+		foreign, err = f.e.foreignSet(tx, paths.Project(repo), []string{f.ids["badger"]})
+		return err
+	})
+	if foreign[f.ids["badger"]] {
+		t.Fatal("a neuron recorded under a symlinked path is foreign to its own repository")
 	}
 }

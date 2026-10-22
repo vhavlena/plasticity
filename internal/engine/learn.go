@@ -104,7 +104,8 @@ func (e *Engine) potentiatePair(tx *store.Tx, a, b activated, fires map[string]*
 }
 
 // coUseInWindow strengthens each reported neuron with the neurons the
-// session reported used within its last ContextWindow prompts, at
+// session reported used within the task window (the current prompt and the
+// ContextWindow before it), at
 // WindowLTPFactor of the full rate. With embeddings, a pair is linked only if
 // their cosine is at least WindowLTPMinCos: a topic switch inside the window
 // (issue triage, then a regression) puts unrelated neurons side by side. Single-neuron reports of one task thus
@@ -294,8 +295,8 @@ func (e *Engine) ReinforceSession(session string) (*LearnReport, error) {
 
 // Feedback tells the graph which nodes were actually useful in the session.
 // Used nodes are potentiated with each other (activation 1) and, at
-// WindowLTPFactor, with the nodes the session reported used within its last
-// ContextWindow prompts (see coUseInWindow). For each node
+// WindowLTPFactor, with the nodes the session reported used within the task
+// window (see coUseInWindow). For each node
 // recalled in the session's pending traces but not used, LTD weakens the
 // associative link that activated it: the last hop of its activation path,
 // at full rate if the path runs through a used node and at
@@ -368,6 +369,14 @@ func (e *Engine) Feedback(session string, used []string) (*LearnReport, error) {
 			// no link is weakened for it.
 			path := unusedPath[r]
 			if len(path) < 2 {
+				continue
+			}
+			// A hop from a superseded neuron to its successor is a redirect
+			// (see redirectSuperseded), not activation carried by a link.
+			prev := path[len(path)-2]
+			if s, err := currentSuccessor(tx, prev, map[string]*model.Node{}); err != nil {
+				return err
+			} else if s == r && s != prev {
 				continue
 			}
 			rate := e.P.LTDIndirectFactor

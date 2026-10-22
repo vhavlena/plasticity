@@ -89,7 +89,7 @@ type Params struct {
 	// 1 = treat them as fully unexplained query content).
 	AbsentTermWeight float64 `json:"absent_term_weight"`
 	// MinMatchedIDFShare: a lexical hit seeds only if the rarest term it
-	// matched has IDF ≥ share · idf(N, N/10), i.e. the hit matched a term
+	// matched has IDF ≥ share · idf(N, max(1, N/10)), i.e. the hit matched a term
 	// about as rare as one occurring in 10% of the neurons. Generic words
 	// ("use", "project") alone no longer seed. 0 turns it off.
 	MinMatchedIDFShare float64 `json:"min_matched_idf_share"`
@@ -171,15 +171,16 @@ type Params struct {
 	// ContextLinks caps how many recent session neurons a new one links to.
 	ContextLinks int `json:"context_links"`
 	// WindowLTPFactor scales the LTP rate between a neuron reported used and
-	// the neurons the session reported used within its last ContextWindow
-	// prompts (0 turns this off).
+	// the neurons the session reported used within the task window (see
+	// ContextWindow; 0 turns this off).
 	WindowLTPFactor float64 `json:"window_ltp_factor"`
 	// WindowLTPMinCos: with embeddings, co-use within the window links two
 	// neurons only if their embedding cosine is at least this (0 = always).
 	WindowLTPMinCos float64 `json:"window_ltp_min_cos"`
-	// ContextWindow: a new neuron links only to session neurons used or
-	// created within the last ContextWindow user prompts (notifications do
-	// not count), i.e. to the same task. 0 = the whole session.
+	// ContextWindow is the task window: the current user prompt and the
+	// ContextWindow prompts before it (notifications do not count). A new
+	// neuron links only to session neurons used or created in it. 0 = the
+	// whole session.
 	ContextWindow int `json:"context_window"`
 	// DedupeCos: adding a neuron whose embedding has at least this cosine to
 	// an existing one returns the existing one instead (unless forced).

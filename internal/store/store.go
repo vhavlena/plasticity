@@ -142,7 +142,7 @@ func scanNode(r scanner, extra ...any) (*model.Node, error) {
 // FindTitle returns the first node, shortest title first, whose title
 // matches the LIKE pattern (escape character \) and satisfies same; nil if
 // none does.
-func (t *Tx) FindTitle(pattern string, same func(title string) bool) (*model.Node, error) {
+func (t *Tx) FindTitle(pattern string, same func(n *model.Node) bool) (*model.Node, error) {
 	rows, err := t.tx.Query(`SELECT `+nodeCols+` FROM nodes WHERE title LIKE ? ESCAPE '\' ORDER BY length(title)`, pattern)
 	if err != nil {
 		return nil, err
@@ -153,7 +153,7 @@ func (t *Tx) FindTitle(pattern string, same func(title string) bool) (*model.Nod
 		if err != nil {
 			return nil, err
 		}
-		if same(n.Title) {
+		if same(n) {
 			return n, nil
 		}
 	}
@@ -193,6 +193,13 @@ func (t *Tx) SetSupersededBy(id, successor string) error {
 		return fmt.Errorf("node %s: %w", id, ErrNotFound)
 	}
 	return nil
+}
+
+// RepointSuperseded makes the neurons superseded by old superseded by
+// successor instead ("" makes them current).
+func (t *Tx) RepointSuperseded(old, successor string) error {
+	_, err := t.tx.Exec(`UPDATE nodes SET superseded_by = ? WHERE superseded_by = ?`, successor, old)
+	return err
 }
 
 // SetDormant updates the dormancy flag.
@@ -1059,6 +1066,17 @@ func (t *Tx) NodeProjects(ids []string) (map[string][]NodeProject, error) {
 		}
 	}
 	return out, nil
+}
+
+// SessionPaired reports whether a and b could have been joined by a context
+// link: one of them was created (or is the episode) in a session in which
+// the other was used or created.
+func (t *Tx) SessionPaired(a, b string) (bool, error) {
+	var n int
+	err := t.tx.QueryRow(`SELECT count(*) FROM session_nodes x JOIN session_nodes y ON x.session = y.session
+		WHERE x.role IN ('created', 'episode') AND y.role IN ('used', 'created')
+		AND ((x.node_id = ? AND y.node_id = ?) OR (x.node_id = ? AND y.node_id = ?))`, a, b, b, a).Scan(&n)
+	return n > 0, err
 }
 
 // SessionNodes returns the neurons a session recorded under the given roles,

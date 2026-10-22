@@ -26,8 +26,9 @@ type DemoteReport struct {
 
 // DemoteUnconfirmed lowers unconfirmed context links made before they were
 // tentative: associative edges never co-used (coactivations = 0) whose stored
-// weight is still the old context link weight from, to weight to. With
-// dryRun nothing is written.
+// weight is still the old context link weight from and whose endpoints a
+// session's context could have joined (one created in a session that used
+// or created the other), to weight to. With dryRun nothing is written.
 func (e *Engine) DemoteUnconfirmed(from, to float64, dryRun bool) (*DemoteReport, error) {
 	rep := &DemoteReport{DryRun: dryRun, Edges: []DemotedEdge{}}
 	write := e.st.Write
@@ -43,7 +44,16 @@ func (e *Engine) DemoteUnconfirmed(from, to float64, dryRun bool) (*DemoteReport
 				return err
 			}
 			for _, ed := range page {
-				if ed.Kind == model.KindAssociative && ed.Coactivations == 0 && math.Abs(ed.Weight-from) < 1e-9 {
+				if ed.Kind != model.KindAssociative || ed.Coactivations != 0 || math.Abs(ed.Weight-from) >= 1e-9 {
+					continue
+				}
+				// Only links a session's context could have made: a link of
+				// the same weight created by hand (link -k associative) stays.
+				paired, err := tx.SessionPaired(ed.Src, ed.Dst)
+				if err != nil {
+					return err
+				}
+				if paired {
 					found = append(found, ed)
 				}
 			}

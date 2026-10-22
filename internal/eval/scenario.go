@@ -87,6 +87,10 @@ type Query struct {
 	// OutputTail is the end of the task's output file for a notification
 	// (what the prompt hook reads for a failed task).
 	OutputTail string `json:"output_tail,omitempty"`
+	// Planned marks a notification whose Q is the query the prompt hook
+	// already derived (as logged since notifications are planned): it is
+	// recalled as is, with the hook's notification limit and confidence.
+	Planned bool `json:"planned,omitempty"`
 	// Add lists nodes the agent stores after this query (and its used
 	// report) within the session; they are absent from the graph until then
 	// and get the engine's add-time context links.

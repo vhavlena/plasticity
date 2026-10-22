@@ -37,6 +37,8 @@ type Engine struct {
 	// Warnings collects non-fatal problems (e.g. an unreachable embedder)
 	// for the caller to report.
 	Warnings []string
+
+	projectNorm map[string]string // memoized normProject
 }
 
 // Option customizes an engine at Open.
@@ -249,7 +251,18 @@ func (e *Engine) refreshVector(n *model.Node) error {
 
 // DeleteNode removes a node and its synapses.
 func (e *Engine) DeleteNode(id string) error {
-	return e.st.Write(func(tx *store.Tx) error { return tx.DeleteNode(id) })
+	return e.st.Write(func(tx *store.Tx) error {
+		n, err := tx.GetNode(id)
+		if err != nil {
+			return err
+		}
+		// Neurons it superseded now point to its own successor (or are
+		// current again): a dangling mark would hide them for good.
+		if err := tx.RepointSuperseded(id, n.SupersededBy); err != nil {
+			return err
+		}
+		return tx.DeleteNode(id)
+	})
 }
 
 // EdgeView is an edge seen from one node, with its current effective weight.

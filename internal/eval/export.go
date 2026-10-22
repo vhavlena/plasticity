@@ -173,10 +173,13 @@ func ExportSessions(events []store.Event, nodes []*model.Node, edges []engine.Ex
 				continue
 			}
 			q := Query{Q: p.query(), Relevant: rel}
-			if p.Source == "" || p.Source == engine.RecallSourcePrompt {
+			switch p.Source {
+			case "", engine.RecallSourcePrompt:
 				if hooks.IsNotification(q.Q) {
 					q.Source = SourceNotification // logged raw: replay through the hook's plan
 				}
+			case engine.RecallSourceNotification:
+				q.Source, q.Planned = SourceNotification, true // logged after planning
 			}
 			sess.Queries = append(sess.Queries, q)
 		}

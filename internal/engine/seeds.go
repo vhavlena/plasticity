@@ -110,7 +110,7 @@ func (s *seeding) confidence() float64 { return math.Max(s.lexical, s.semantic) 
 // ones.
 //
 // In graphs of at least MinEvidenceNodes neurons, a hit seeds only if the
-// rarest term it matched has IDF ≥ MinMatchedIDFShare · idf(N, N/10): a match
+// rarest term it matched has IDF ≥ MinMatchedIDFShare · idf(N, max(1, N/10)): a match
 // on generic words alone ("use", "project", "build") is no evidence, however
 // well it covers a short query.
 func (e *Engine) lexicalStrengths(tx *store.Tx, terms []string, hits []store.SearchHit, sd *seeding) (map[string]float64, error) {
@@ -158,7 +158,7 @@ func (e *Engine) lexicalStrengths(tx *store.Tx, terms []string, hits []store.Sea
 	}
 	minIDF := 0.0
 	if n >= e.P.MinEvidenceNodes {
-		minIDF = e.P.MinMatchedIDFShare * idf(n, n/10)
+		minIDF = e.P.MinMatchedIDFShare * idf(n, max(1, n/10)) // idf(n, 0) exceeds every real term's
 	}
 	for _, h := range hits {
 		if rarest[h.Node.ID] >= minIDF {

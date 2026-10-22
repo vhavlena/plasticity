@@ -208,7 +208,13 @@ func Run(s *Scenario, cfg Config, dir string) (*Result, error) {
 				qr := QueryResult{Pass: pass, Session: si, Query: qi, Text: q.Q, Source: q.Source, Hits: []string{}}
 				// Prompts and notifications are planned like the prompt hook does.
 				req := engine.RecallRequest{Query: q.Q, Session: sid, Project: sess.Project, Limit: cfg.K}
-				if q.Source == SourcePrompt || q.Source == SourceNotification {
+				if q.Source == SourceNotification && q.Planned {
+					req.ExcludeSuperseded, req.Auto = true, true
+					req.MinConfidence = hookCfg.NotificationMinConfidence
+					if hookCfg.NotificationLimit > 0 {
+						req.Limit = min(req.Limit, hookCfg.NotificationLimit)
+					}
+				} else if q.Source == SourcePrompt || q.Source == SourceNotification {
 					req.ExcludeSuperseded, req.Auto = true, true // as the prompt hook
 					plan := hookCfg.PlanRecall(q.Q, func(string) string { return q.OutputTail })
 					qr.Skipped = plan.Skip

@@ -175,4 +175,16 @@ INSERT INTO node_projects (node_id, project, created, uses)
 ALTER TABLE node_access ADD COLUMN weight REAL NOT NULL DEFAULT 1;
 INSERT INTO node_access (node_id, tick, weight) SELECT id, created_tick, 1 FROM nodes;
 `,
+	// node_projects rebuilt from the session history: a database migrated
+	// by a newer binary but then used by an older one (which records
+	// sessions but does not keep node_projects) has stale rows. The rebuild
+	// yields exactly what AddSessionNodes would have recorded.
+	`
+DELETE FROM node_projects;
+INSERT INTO node_projects (node_id, project, created, uses)
+	SELECT sn.node_id, s.project, max(sn.role = 'created'), sum(sn.role = 'used')
+	FROM session_nodes sn JOIN sessions s ON s.id = sn.session JOIN nodes n ON n.id = sn.node_id
+	WHERE s.project <> '' AND sn.role IN ('created', 'used')
+	GROUP BY sn.node_id, s.project;
+`,
 }

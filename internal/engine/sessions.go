@@ -317,7 +317,9 @@ func (e *Engine) AddNodeChecked(n *model.Node, opt AddOptions) (*AddResult, erro
 	vec := e.embedNode(ctx, n)
 	res := &AddResult{Node: n}
 	if !opt.Force {
-		dup, sim, reason, err := e.findDuplicate(n, vec)
+		// The neurons it supersedes are expected to be near-duplicates (a
+		// corrected version of the same note); they are not duplicates.
+		dup, sim, reason, err := e.findDuplicate(n, vec, opt.Supersedes)
 		if err != nil {
 			return nil, err
 		}
@@ -399,13 +401,13 @@ func (e *Engine) similarNeurons(vec *nodeVector, k int) ([]SimilarNeuron, error)
 	return out, err
 }
 
-func (e *Engine) findDuplicate(n *model.Node, vec *nodeVector) (*model.Node, float64, string, error) {
+func (e *Engine) findDuplicate(n *model.Node, vec *nodeVector, except []string) (*model.Node, float64, string, error) {
 	var dup *model.Node
 	var sim float64
 	var reason string
 	err := e.st.Read(func(tx *store.Tx) error {
-		same, err := tx.FindTitle(titlePattern(n.Title), func(title string) bool {
-			return normTitle(title) == normTitle(n.Title)
+		same, err := tx.FindTitle(titlePattern(n.Title), func(m *model.Node) bool {
+			return normTitle(m.Title) == normTitle(n.Title) && !slices.Contains(except, m.ID)
 		})
 		if err != nil {
 			return err
@@ -421,14 +423,23 @@ func (e *Engine) findDuplicate(n *model.Node, vec *nodeVector) (*model.Node, flo
 		if err != nil {
 			return err
 		}
-		best, err := e.semanticSearch(tx, v, 1, nil)
-		if err != nil || len(best) == 0 || best[0].cos < e.P.DedupeCos {
+		hits, err := e.semanticSearch(tx, v, 1+len(except), nil)
+		if err != nil {
 			return err
 		}
-		if dup, err = tx.GetNode(best[0].id); err != nil {
-			return err
+		for _, h := range hits {
+			if slices.Contains(except, h.id) {
+				continue
+			}
+			if h.cos < e.P.DedupeCos {
+				return nil
+			}
+			if dup, err = tx.GetNode(h.id); err != nil {
+				return err
+			}
+			sim, reason = h.cos, "similar embedding"
+			return nil
 		}
-		sim, reason = best[0].cos, "similar embedding"
 		return nil
 	})
 	return dup, sim, reason, err
@@ -470,7 +481,8 @@ func (e *Engine) NoteNodeProject(id, project string, created bool, uses int) err
 
 // linkToSession links node to the session's most recent used/created
 // neurons, records it under role, and returns the number of links made.
-// With window, only neurons of the last ContextWindow prompts are linked (an
+// With window, only neurons of the current prompt and the ContextWindow
+// prompts before it are linked (an
 // episode summarizes the whole session, a new neuron belongs to its task).
 // Existing links are kept as they are (their learned weights included).
 func (e *Engine) linkToSession(session, node, role string, window bool) (int, error) {

@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"path/filepath"
 	"slices"
 	"sort"
 
 	"github.com/oklog/ulid/v2"
 
 	"github.com/vhavlena/plasticity/internal/model"
+	"github.com/vhavlena/plasticity/internal/paths"
 	"github.com/vhavlena/plasticity/internal/plasticity"
 	"github.com/vhavlena/plasticity/internal/retrieval"
 	"github.com/vhavlena/plasticity/internal/store"
@@ -237,9 +239,15 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 		}
 		act := spread.Activations
 		redirected := map[string][]string{} // successor → superseded neurons it took activation from
+		replaced := map[string]bool{}       // superseded neurons with a current successor
 		if req.ExcludeSuperseded {
 			if act, ids, err = redirectSuperseded(tx, act, ids, graphScore, nodes, redirected); err != nil {
 				return err
+			}
+			for _, olds := range redirected {
+				for _, old := range olds {
+					replaced[old] = true
+				}
 			}
 		}
 		acc, err := tx.Accesses(ids)
@@ -248,7 +256,7 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 		}
 		for _, id := range ids {
 			n, a := nodes[id], act[id]
-			if n == nil || slices.Contains(req.ExcludeTypes, n.Type) || req.ExcludeSuperseded && n.SupersededBy != "" {
+			if n == nil || slices.Contains(req.ExcludeTypes, n.Type) || req.ExcludeSuperseded && replaced[id] {
 				continue
 			}
 			b := plasticity.BaseLevel(acc[id], tick, p.ActrDecay)
@@ -306,7 +314,14 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 		} else {
 			for _, h := range res.Hits {
 				if h.Activation >= p.LearnMinActivation {
-					tr.Entries = append(tr.Entries, store.TraceEntry{NodeID: h.Node.ID, Activation: h.Activation, Path: h.Path})
+					// A seed was found on its own evidence even if a stronger
+					// path reached it through a neighbor: learning treats it as
+					// its own source (feedback weakens no link for it).
+					path := h.Path
+					if h.IsSeed {
+						path = []string{h.Node.ID}
+					}
+					tr.Entries = append(tr.Entries, store.TraceEntry{NodeID: h.Node.ID, Activation: h.Activation, Path: path})
 				}
 			}
 			if len(tr.Entries) == 0 {
@@ -370,8 +385,9 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 
 // redirectSuperseded moves the activation of every reached superseded neuron
 // to its current successor: the successor's activation (and graph score)
-// becomes the maximum of its own and the old neuron's, and if that came from
-// the old neuron its path is the old one's path followed by the successor.
+// becomes the maximum of its own and the old neuron's. A successor reached
+// itself keeps its own path; one reached only through the redirect gets the
+// old neuron's path followed by itself.
 // Successors not reached by spreading are added to ids (and nodes).
 // redirected collects, per successor, the superseded neurons it absorbed.
 func redirectSuperseded(tx *store.Tx, act map[string]*retrieval.Activation, ids []string, graphScore map[string]float64,
@@ -394,12 +410,15 @@ func redirectSuperseded(tx *store.Tx, act map[string]*retrieval.Activation, ids 
 		}
 		redirected[s] = append(redirected[s], id)
 		old := act[id]
-		if cur, ok := out[s]; !ok || cur.Score < old.Score {
-			if !ok {
-				ids = append(ids, s)
-			}
+		switch cur, ok := out[s]; {
+		case !ok: // reached only through the redirect
+			ids = append(ids, s)
 			out[s] = &retrieval.Activation{ID: s, Score: old.Score, Seed: old.Seed, Hops: old.Hops + 1,
-				Path: append(slices.Clone(old.Path), s), IsSeed: ok && cur.IsSeed}
+				Path: append(slices.Clone(old.Path), s)}
+		case cur.Score < old.Score: // reached itself: keep its own path and seed status
+			c := *cur
+			c.Score = old.Score
+			out[s] = &c
 		}
 		graphScore[s] = math.Max(graphScore[s], graphScore[id])
 	}
@@ -465,6 +484,12 @@ func (e *Engine) foreignSet(tx *store.Tx, project string, ids []string) (map[str
 	if err != nil {
 		return nil, err
 	}
+	project = e.normProject(project)
+	for _, ps := range projects {
+		for i := range ps {
+			ps[i].Project = e.normProject(ps[i].Project)
+		}
+	}
 	var candidates []string
 	for _, id := range ids {
 		if foreignByProjects(projects[id], project, e.P.SharedMinProjects) {
@@ -486,6 +511,25 @@ func (e *Engine) foreignSet(tx *store.Tx, project string, ids []string) (map[str
 	return foreign, nil
 }
 
+// normProject resolves a stored project directory the way paths.Project
+// does now (symlinks, worktrees → main repository), so records written
+// before that resolution existed match a recall's project. Names that are
+// not absolute paths (as in evaluation scenarios) are left as they are.
+func (e *Engine) normProject(p string) string {
+	if !filepath.IsAbs(p) {
+		return p
+	}
+	if n, ok := e.projectNorm[p]; ok {
+		return n
+	}
+	if e.projectNorm == nil {
+		e.projectNorm = map[string]string{}
+	}
+	n := paths.Project(p)
+	e.projectNorm[p] = n
+	return n
+}
+
 // foreignByProjects reports whether a neuron with these project records is
 // foreign to project: it has records, none for project, and is used in
 // fewer than sharedMin projects.
@@ -493,14 +537,14 @@ func foreignByProjects(ps []store.NodeProject, project string, sharedMin int) bo
 	if len(ps) == 0 {
 		return false
 	}
-	used := 0
+	used := map[string]bool{} // distinct projects (records may normalize to the same one)
 	for _, p := range ps {
 		if p.Project == project {
 			return false
 		}
 		if p.Uses > 0 {
-			used++
+			used[p.Project] = true
 		}
 	}
-	return used < sharedMin
+	return len(used) < sharedMin
 }

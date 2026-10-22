@@ -163,3 +163,21 @@ func TestCoUseWithinTaskWindow(t *testing.T) {
 		t.Fatalf("window_ltp_factor 0 should turn it off: %+v", rep)
 	}
 }
+
+// A seed whose strongest activation came through a neighbor is still its own
+// source: when it goes unused, feedback weakens no link for it.
+func TestLTDSparesSeedsReachedThroughNeighbors(t *testing.T) {
+	f := chain(t)
+	r := f.recall("sqlite WAL storage badger", "s")
+	h, ok := hitIDs(r)[f.ids["badger"]]
+	if !ok || !h.IsSeed || len(h.Path) < 2 {
+		t.Fatalf("precondition: badger should be a seed reached more strongly via sqlite: %+v", h)
+	}
+	w := f.weight("sqlite", "badger")
+	if _, err := f.e.Feedback("s", []string{f.ids["sqlite"]}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.weight("sqlite", "badger"); got < w {
+		t.Fatalf("the link to an unused seed was weakened: %g -> %g", w, got)
+	}
+}

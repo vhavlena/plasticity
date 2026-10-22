@@ -697,3 +697,15 @@ func TestMinimumEvidence(t *testing.T) {
 		t.Fatalf("without the check the generic match seeds: %+v", r)
 	}
 }
+
+// With min_evidence_nodes below 10, N/10 rounds to 0; the evidence threshold
+// must still be reachable (idf of a term in one neuron).
+func TestMinimumEvidenceInTinyGraphs(t *testing.T) {
+	f := newFixture(t)
+	if err := f.e.SetParam("min_evidence_nodes", "1"); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := f.e.Recall(RecallRequest{Query: "hebbian learning", NoRecord: true}); !hitIDs(r)[f.ids["hebb"]].IsSeed {
+		t.Fatalf("a term unique to one neuron must seed: %+v", r)
+	}
+}

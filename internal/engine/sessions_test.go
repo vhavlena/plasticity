@@ -329,3 +329,33 @@ func TestDemoteUnconfirmed(t *testing.T) {
 		t.Fatalf("co-used link changed: %g -> %g", confirmed, w)
 	}
 }
+
+// The task window is the current prompt and the context_window prompts
+// before it: a neuron used exactly context_window prompts back is linked,
+// one a prompt earlier is not.
+func TestContextWindowBoundary(t *testing.T) {
+	f := newFixture(t)
+	f.e.StartSession("S", "/repo", "startup")
+	prompt := func() {
+		if err := f.e.NotePrompt("S", "/repo", "next"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := f.e.P.ContextWindow
+	prompt() // prompt 1
+	f.e.Used("S", []string{f.ids["sqlite"]})
+	prompt() // prompt 2
+	f.e.Used("S", []string{f.ids["hooks"]})
+	for i := 0; i < w; i++ {
+		prompt()
+	}
+	// Current prompt 2+w: prompt 2 is exactly w back, prompt 1 is w+1 back.
+	res, err := f.e.AddNodeChecked(&model.Node{Type: model.TypeFact, Title: "Boundary probe"}, AddOptions{Session: "S"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.ids["probe"] = res.Node.ID
+	if f.weight("probe", "hooks") == 0 || f.weight("probe", "sqlite") != 0 {
+		t.Fatalf("window boundary: hooks %g (want > 0), sqlite %g (want 0)", f.weight("probe", "hooks"), f.weight("probe", "sqlite"))
+	}
+}

@@ -263,3 +263,20 @@ func TestUsageNotifications(t *testing.T) {
 		t.Fatalf("report:\n%s", b.String())
 	}
 }
+
+// A notification recall logged after planning (source "notification") is
+// exported as a planned notification, not replayed as a plain query.
+func TestExportPlannedNotification(t *testing.T) {
+	l := &eventLog{}
+	l.add("S", engine.EventRecall, map[string]any{"source": engine.RecallSourceNotification,
+		"query": "run_analysis failed: cannot locate VeriRego tool(s)", "hits": []map[string]any{{"id": "A"}}, "confidence": 0.7})
+	l.used("S", 0, "A")
+	nodes := []*model.Node{{ID: "A", Type: model.TypeFact, Title: "node A"}}
+	s, _, err := ExportSessions(l.evs, nodes, nil, ExportOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q := s.Sessions[0].Queries[0]; q.Source != SourceNotification || !q.Planned {
+		t.Fatalf("planned notification exported as %+v", q)
+	}
+}
