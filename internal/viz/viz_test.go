@@ -13,7 +13,7 @@ func TestWriteEmbedsDataSafely(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := buf.String()
-	if strings.Contains(out, placeholder) {
+	if strings.Contains(out, placeholder) || strings.Contains(out, "/*VIEW3D*/") || !strings.Contains(out, "const view3d") {
 		t.Fatal("placeholder not replaced")
 	}
 	if n := strings.Count(out, "</script>"); n != 1 {

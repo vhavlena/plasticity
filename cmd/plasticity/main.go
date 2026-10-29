@@ -627,12 +627,13 @@ func (a *app) exportCmd() *cobra.Command {
 
 func (a *app) vizCmd() *cobra.Command {
 	var file string
-	var noOpen bool
+	var noOpen, threeD bool
 	c := &cobra.Command{
 		Use:   "viz",
 		Short: "Write an interactive HTML visualization of the graph and open it",
 		Long: "Write the whole graph as a self-contained HTML page (no network access needed)\n" +
-			"and open it in the browser. The default file sits next to the database.",
+			"and open it in the browser. The page has a 2D and a 3D (WebGL) view.\n" +
+			"The default file sits next to the database.",
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			if file == "" {
@@ -640,7 +641,11 @@ func (a *app) vizCmd() *cobra.Command {
 			}
 			return a.with(func(e *engine.Engine) (any, error) {
 				var buf bytes.Buffer
-				if err := e.Export(&buf, "html"); err != nil {
+				view := ""
+				if threeD {
+					view = "3d"
+				}
+				if err := e.ExportHTML(&buf, view); err != nil {
 					return nil, err
 				}
 				if err := os.WriteFile(file, buf.Bytes(), 0o600); err != nil {
@@ -664,6 +669,7 @@ func (a *app) vizCmd() *cobra.Command {
 	}
 	c.Flags().StringVarP(&file, "output", "o", "", "HTML file to write (default: the database path with .html)")
 	c.Flags().BoolVar(&noOpen, "no-open", false, "only write the file, do not open a browser")
+	c.Flags().BoolVar(&threeD, "3d", false, "open in the 3D view (otherwise the view last used)")
 	return c
 }
 
