@@ -91,7 +91,7 @@ uniform vec3 u_fog; uniform vec2 u_fogRange;
 varying vec4 v_color; varying float v_t, v_side, v_half, v_dash, v_depth;
 void main() {
 	if (v_dash > 0.5 && v_dash < 1.5 && mod(v_t, 10.0) > 6.0) discard;
-	if (v_dash > 1.5 && mod(v_t, 5.0) > 2.0) discard;
+	if (v_dash > 1.5 && mod(v_t, 7.0) > 4.0) discard;
 	float fog = smoothstep(u_fogRange.x, u_fogRange.y, v_depth) * 0.85;
 	float aa = clamp(v_half + 0.5 - abs(v_side), 0.0, 1.0);
 	gl_FragColor = vec4(mix(v_color.rgb, u_fog, fog), v_color.a * aa * (1.0 - fog * 0.5));
@@ -604,8 +604,8 @@ void main() {
 			if (!e.drawn) continue;
 			const A = [e.s.qx, e.s.qy, e.s.qz], B = [e.t.qx, e.t.qy, e.t.qz];
 			if (!clip(A, B)) continue;
-			let c = e.kind === "associative" ? col(colors.edge) : col(colors["k-" + e.kind]);
-			let width = e.tentative ? 0.8 : 0.8 + 2.6 * e.w, a;
+			let c = e.tentative ? col(colors.tentative) : e.kind === "associative" ? col(colors.strong) : col(colors["k-" + e.kind]);
+			let width = e.tentative ? 1 : 0.8 + 3.6 * e.w, a;
 			const dash = e.kind === "contradicts" ? 1 : e.tentative ? 2 : 0;
 			if (spread) {
 				const tr = spread.tree.get(e);
@@ -614,9 +614,10 @@ void main() {
 			} else {
 				const on = focus ? focus.has(e.s) && focus.has(e.t) && (e.s === sel || e.t === sel) : !searching;
 				a = on ? 1 : 0.15;
+				if (e.kind === "associative" && !e.tentative) a *= 0.3 + 0.7 * e.strength;
 				if (on && focus) {
 					width *= 1.3;
-					if (e.kind === "associative") c = col(colors.muted);
+					if (e.kind === "associative" && !e.tentative) c = col(colors.muted);
 				}
 				// Particles run from source to target: the synapse's direction.
 				if (opts.flow && e.kind !== "associative") {

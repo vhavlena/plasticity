@@ -13,6 +13,7 @@
 	--t-procedure: #0891b2; --t-episode: #8a8f98; --t-question: #db2777;
 	--k-associative: rgba(60, 60, 70, 0.35); --k-supports: #059669; --k-derives_from: #2563eb;
 	--k-contradicts: #dc2626; --k-part_of: #7c3aed; --k-explicit: #d97706;
+	--tentative: rgba(71, 85, 105, 0.5); --edge-strong: rgba(45, 45, 55, 0.9);
 }
 @media (prefers-color-scheme: dark) {
 	:root:not([data-theme="light"]) {
@@ -23,6 +24,7 @@
 		--t-procedure: #22d3ee; --t-episode: #9ca3af; --t-question: #f472b6;
 		--k-associative: rgba(200, 200, 215, 0.3); --k-supports: #34d399; --k-derives_from: #60a5fa;
 		--k-contradicts: #f87171; --k-part_of: #a78bfa; --k-explicit: #fbbf24;
+		--tentative: rgba(148, 163, 184, 0.5); --edge-strong: rgba(225, 225, 235, 0.9);
 	}
 }
 :root[data-theme="dark"] {
@@ -33,6 +35,7 @@
 	--t-procedure: #22d3ee; --t-episode: #9ca3af; --t-question: #f472b6;
 	--k-associative: rgba(200, 200, 215, 0.3); --k-supports: #34d399; --k-derives_from: #60a5fa;
 	--k-contradicts: #f87171; --k-part_of: #a78bfa; --k-explicit: #fbbf24;
+	--tentative: rgba(148, 163, 184, 0.5); --edge-strong: rgba(225, 225, 235, 0.9);
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -65,6 +68,8 @@ input[type="search"]:focus { outline: 2px solid var(--accent); outline-offset: -
 .filters .n { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
 .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
 .bar { width: 16px; height: 3px; border-radius: 2px; flex: none; }
+.dash { width: 16px; height: 0; border-top: 2px dashed; flex: none; }
+.legend { display: flex; align-items: center; gap: 8px; padding: 2px 0 2px 21px; }
 .row { display: flex; align-items: center; gap: 8px; }
 input[type="range"] { flex: 1; accent-color: var(--accent); }
 input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
@@ -170,8 +175,8 @@ button:hover { border-color: var(--muted); }
 			<button id="fit">Fit view</button>
 			<button id="relayout">Re-layout</button>
 		</div>
-		<div class="sub" id="help2d">Drag to pan, scroll to zoom, drag a neuron to move it, click it for details. Size grows with importance and use; edge thickness is the current (effective) weight; thin dashed links are too weak to spread activation (tentative).</div>
-		<div class="sub" id="help3d" hidden>Drag to orbit, right-drag or shift-drag to pan, scroll to zoom, drag a neuron to move it, click it for details, double-click to focus. Size grows with importance and use; edge thickness is the current (effective) weight; dots run along typed synapses in their direction; thin dotted links are too weak to spread activation (tentative). <i>Simulate recall</i> in a neuron's details replays spreading activation from it.</div>
+		<div class="sub" id="help2d">Drag to pan, scroll to zoom, drag a neuron to move it, click it for details. Size grows with importance and use; edge thickness is the current (effective) weight; dashed slate links are too weak to spread activation (tentative).</div>
+		<div class="sub" id="help3d" hidden>Drag to orbit, right-drag or shift-drag to pan, scroll to zoom, drag a neuron to move it, click it for details, double-click to focus. Size grows with importance and use; edge thickness is the current (effective) weight; dots run along typed synapses in their direction; dashed slate links are too weak to spread activation (tentative). <i>Simulate recall</i> in a neuron's details replays spreading activation from it.</div>
 	</aside>
 	<main id="stage">
 		<button id="toggle">☰ Filters</button>
@@ -212,7 +217,10 @@ for (const e of DATA.edges) {
 	// Tentative: an associative link too weak to spread activation
 	// (below firing_threshold / hop_decay), e.g. an unconfirmed context link.
 	const tentative = e.kind === "associative" && DATA.propagation_weight !== undefined && w < DATA.propagation_weight;
-	const ed = { s, t, kind: e.kind, w, tentative, raw: e };
+	// Strength in 0..1 above the propagation weight: associative links fade
+	// from faint to strong with it.
+	const pw = tentative || DATA.propagation_weight === undefined ? 0 : DATA.propagation_weight;
+	const ed = { s, t, kind: e.kind, w, tentative, strength: Math.max(0, Math.min(1, (w - pw) / (1 - pw || 1))), raw: e };
 	edges.push(ed);
 	s.adj.push(ed);
 	t.adj.push(ed);
@@ -548,7 +556,7 @@ let W = 0, H = 0, DPR = 1, colors = {};
 function readColors() {
 	const cs = getComputedStyle(document.documentElement);
 	const v = (k) => cs.getPropertyValue(k).trim();
-	colors = { edge: v("--edge"), label: v("--label"), halo: v("--halo"), accent: v("--accent"), bg: v("--bg"), muted: v("--muted") };
+	colors = { edge: v("--edge"), label: v("--label"), halo: v("--halo"), accent: v("--accent"), bg: v("--bg"), muted: v("--muted"), tentative: v("--tentative"), strong: v("--edge-strong") };
 	for (const t of TYPES) colors["t-" + t] = v("--t-" + t);
 	for (const k of KINDS) colors["k-" + k] = v("--k-" + k);
 }
@@ -586,10 +594,12 @@ function draw() {
 		if (!e.drawn) continue;
 		const on = focus ? focus.has(e.s) && focus.has(e.t) && (e.s === (state.selected || state.hover) || e.t === (state.selected || state.hover)) : !searching;
 		ctx.globalAlpha = on ? 1 : 0.15;
-		ctx.strokeStyle = e.kind === "associative" ? colors.edge : colors["k-" + e.kind];
+		ctx.strokeStyle = e.kind === "associative" ? colors.strong : colors["k-" + e.kind];
+		if (e.kind === "associative" && !e.tentative) ctx.globalAlpha *= 0.3 + 0.7 * e.strength;
 		if (on && focus && e.kind === "associative") ctx.strokeStyle = colors.muted;
-		ctx.lineWidth = (e.tentative ? 0.5 : 0.6 + 3.4 * e.w) / Math.sqrt(k);
-		ctx.setLineDash(e.kind === "contradicts" ? [6 / k, 4 / k] : e.tentative ? [2 / k, 3 / k] : []);
+		if (e.tentative) ctx.strokeStyle = colors.tentative;
+		ctx.lineWidth = (e.tentative ? 0.9 : 0.6 + 4.4 * e.w) / Math.sqrt(k);
+		ctx.setLineDash(e.kind === "contradicts" ? [6 / k, 4 / k] : e.tentative ? [4 / k, 3 / k] : []);
 		ctx.beginPath();
 		ctx.moveTo(e.s.x, e.s.y);
 		ctx.lineTo(e.t.x, e.t.y);
@@ -942,6 +952,13 @@ function buildControls() {
 	for (const t of TYPES) if (tc[t]) legendRow(types, t, t, "dot", colors["t-" + t], tc[t], state.types);
 	for (const k of KINDS) if (kc[k]) legendRow(kinds, k, k.replace("_", " "), "bar", colors["k-" + k], kc[k], state.kinds);
 	if (!edges.length) kinds.append(el("div", { className: "sub", textContent: "No synapses yet." }));
+	const tentative = edges.filter((e) => e.tentative).length;
+	if (tentative) {
+		const sw = el("span", { className: "dash" });
+		sw.style.borderColor = colors.tentative;
+		kinds.append(el("div", { className: "legend", title: "Associative links below firing_threshold / hop_decay carry no activation on their own" },
+			sw, "tentative (too weak)", el("span", { className: "n", textContent: tentative })));
+	}
 	const dormant = nodes.filter((n) => n.dormant).length;
 	let s = `${nodes.length} neurons · ${edges.length} synapses`;
 	if (dormant) s += ` · ${dormant} dormant`;
