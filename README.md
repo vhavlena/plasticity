@@ -1,8 +1,14 @@
 # plasticity
 
+[![test](https://github.com/vhavlena/plasticity/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/vhavlena/plasticity/actions/workflows/test.yml)
+
 Long-term memory for Claude Code, shaped like a brain. Knowledge is stored in
 typed **neurons** connected by weighted **synapses**. Neurons used together
 get wired together; connections that are not used fade and disappear.
+
+<p align="center">
+  <img src="docs/plasticity-graph.png" alt="A plasticity memory graph: neurons connected by synapses" width="480">
+</p>
 
 ## Install
 
