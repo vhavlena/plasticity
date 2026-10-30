@@ -1,8 +1,14 @@
 # plasticity
 
+[![test](https://github.com/vhavlena/plasticity/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/vhavlena/plasticity/actions/workflows/test.yml)
+
 Long-term memory for Claude Code, shaped like a brain. Knowledge is stored in
 typed **neurons** connected by weighted **synapses**. Neurons used together
 get wired together; connections that are not used fade and disappear.
+
+<p align="center">
+  <img src="docs/plasticity-graph.png" alt="A plasticity memory graph: neurons connected by synapses" width="480">
+</p>
 
 ## Install
 
@@ -110,7 +116,7 @@ go build -o plasticity ./cmd/plasticity
 go test -race ./...
 plasticity --help                           # full CLI
 plasticity sessions                         # past sessions with the memories they used and created
-plasticity viz                              # interactive HTML view of the graph (export -f html|json|dot)
+plasticity viz [--3d]                       # interactive 2D/3D HTML view of the graph (export -f html|json|dot)
 plasticity eval run SCENARIO.json           # offline evaluation of recall and learning
 plasticity eval report --since 168h         # how memory behaved in real sessions (+ your notes)
 plasticity eval report --by-change          # compare periods between parameter changes
@@ -126,7 +132,7 @@ internal/store       SQLite schema, FTS5 search
 internal/embed       pluggable embedders (hugot in-process, Ollama)
 internal/hooks       Claude Code hook handlers
 internal/eval        scenario replay, metrics, usage reports
-internal/viz         self-contained interactive HTML visualization
+internal/viz         self-contained interactive HTML visualization (2D canvas, 3D WebGL)
 ```
 
 ## License

@@ -171,6 +171,9 @@ func (e *Engine) Export(w io.Writer, format string) error {
 	if format != "json" && format != "dot" && format != "html" {
 		return fmt.Errorf("unknown export format %q (json|dot|html)", format)
 	}
+	if format == "html" {
+		return e.ExportHTML(w, "")
+	}
 	now := timestamp()
 	nodes, edges, err := e.Snapshot()
 	if err != nil {
@@ -181,13 +184,24 @@ func (e *Engine) Export(w io.Writer, format string) error {
 		enc.SetIndent("", "  ")
 		return enc.Encode(map[string]any{"version": version.String(), "exported_at": now, "nodes": nodes, "edges": edges})
 	}
-	if format == "html" {
-		// An associative edge below firing_threshold / hop_decay cannot carry
-		// activation on its own; the page draws such tentative links dashed.
-		return viz.Write(w, map[string]any{"version": version.String(), "exported_at": now, "nodes": nodes, "edges": edges,
-			"propagation_weight": e.P.FiringThreshold / e.P.HopDecay})
-	}
 	return writeDOT(w, nodes, edges)
+}
+
+// ExportHTML writes the interactive visualization. view ("2d" or "3d")
+// selects the initial view; "" keeps the viewer's last choice.
+func (e *Engine) ExportHTML(w io.Writer, view string) error {
+	nodes, edges, err := e.Snapshot()
+	if err != nil {
+		return err
+	}
+	p := e.P
+	// An associative edge below firing_threshold / hop_decay cannot carry
+	// activation on its own; the page draws such tentative links dashed.
+	// The spread parameters let the 3D view replay spreading activation.
+	return viz.Write(w, map[string]any{"version": version.String(), "exported_at": timestamp(), "nodes": nodes, "edges": edges,
+		"propagation_weight": p.FiringThreshold / p.HopDecay, "view": view,
+		"spread": map[string]any{"hop_decay": p.HopDecay, "firing_threshold": p.FiringThreshold,
+			"fan_k0": p.FanK0, "fan_beta": p.FanBeta, "max_hops": p.MaxHops}})
 }
 
 // Snapshot returns all nodes and edges (with their effective weights).

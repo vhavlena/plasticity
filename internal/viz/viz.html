@@ -13,6 +13,7 @@
 	--t-procedure: #0891b2; --t-episode: #8a8f98; --t-question: #db2777;
 	--k-associative: rgba(60, 60, 70, 0.35); --k-supports: #059669; --k-derives_from: #2563eb;
 	--k-contradicts: #dc2626; --k-part_of: #7c3aed; --k-explicit: #d97706;
+	--tentative: rgba(71, 85, 105, 0.5); --edge-strong: rgba(45, 45, 55, 0.9);
 }
 @media (prefers-color-scheme: dark) {
 	:root:not([data-theme="light"]) {
@@ -23,6 +24,7 @@
 		--t-procedure: #22d3ee; --t-episode: #9ca3af; --t-question: #f472b6;
 		--k-associative: rgba(200, 200, 215, 0.3); --k-supports: #34d399; --k-derives_from: #60a5fa;
 		--k-contradicts: #f87171; --k-part_of: #a78bfa; --k-explicit: #fbbf24;
+		--tentative: rgba(148, 163, 184, 0.5); --edge-strong: rgba(225, 225, 235, 0.9);
 	}
 }
 :root[data-theme="dark"] {
@@ -33,8 +35,10 @@
 	--t-procedure: #22d3ee; --t-episode: #9ca3af; --t-question: #f472b6;
 	--k-associative: rgba(200, 200, 215, 0.3); --k-supports: #34d399; --k-derives_from: #60a5fa;
 	--k-contradicts: #f87171; --k-part_of: #a78bfa; --k-explicit: #fbbf24;
+	--tentative: rgba(148, 163, 184, 0.5); --edge-strong: rgba(225, 225, 235, 0.9);
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; height: 100%; }
 body {
 	background: var(--bg); color: var(--fg); overflow: hidden;
@@ -47,6 +51,8 @@ body {
 }
 #stage { position: relative; min-width: 0; }
 canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+#gl, #gl-labels { position: absolute; inset: 0; }
+#gl-labels { pointer-events: none; }
 canvas.dragging { cursor: grabbing; }
 canvas.over { cursor: pointer; }
 h1 { font-size: 15px; margin: 0; letter-spacing: 0.01em; }
@@ -62,6 +68,8 @@ input[type="search"]:focus { outline: 2px solid var(--accent); outline-offset: -
 .filters .n { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
 .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
 .bar { width: 16px; height: 3px; border-radius: 2px; flex: none; }
+.dash { width: 16px; height: 0; border-top: 2px dashed; flex: none; }
+.legend { display: flex; align-items: center; gap: 8px; padding: 2px 0 2px 21px; }
 .row { display: flex; align-items: center; gap: 8px; }
 input[type="range"] { flex: 1; accent-color: var(--accent); }
 input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
@@ -71,6 +79,12 @@ button {
 	background: var(--bg); color: var(--fg); cursor: pointer;
 }
 button:hover { border-color: var(--muted); }
+.seg { display: flex; margin-top: 10px; }
+.seg button { flex: 1; border-radius: 0; }
+.seg button:first-child { border-radius: 6px 0 0 6px; }
+.seg button:last-child { border-radius: 0 6px 6px 0; border-left: none; }
+.seg button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.seg button:disabled { opacity: 0.5; cursor: not-allowed; }
 #details {
 	position: absolute; top: 12px; right: 12px; width: 340px; max-height: calc(100% - 24px); overflow-y: auto;
 	background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
@@ -114,6 +128,10 @@ button:hover { border-color: var(--muted); }
 		<div>
 			<h1>Plasticity graph</h1>
 			<div class="sub" id="summary"></div>
+			<div class="seg" role="group" aria-label="View">
+				<button id="mode2d" aria-pressed="true" title="2D view ( 2 )">2D</button>
+				<button id="mode3d" aria-pressed="false" title="3D view ( 3 )">3D</button>
+			</div>
 		</div>
 		<div>
 			<input type="search" id="search" placeholder="Search neurons  ( / )" autocomplete="off">
@@ -143,15 +161,28 @@ button:hover { border-color: var(--muted); }
 				<label><input type="radio" name="labels" value="off"> Hidden</label>
 			</div>
 		</div>
+		<div id="opts3d" hidden>
+			<h2>3D</h2>
+			<div class="filters">
+				<label><input type="radio" name="color3d" value="type" checked> Color by type</label>
+				<label><input type="radio" name="color3d" value="community"> Color by community</label>
+				<div class="sub" id="comm3d" style="padding-left:21px"></div>
+				<label style="margin-top:4px"><input type="checkbox" id="rotate3d" checked> Auto-rotate  ( R )</label>
+				<label><input type="checkbox" id="flow3d" checked> Flow along typed synapses</label>
+			</div>
+		</div>
 		<div class="buttons">
 			<button id="fit">Fit view</button>
 			<button id="relayout">Re-layout</button>
 		</div>
-		<div class="sub">Drag to pan, scroll to zoom, drag a neuron to move it, click it for details. Size grows with importance and use; edge thickness is the current (effective) weight; thin dashed links are too weak to spread activation (tentative).</div>
+		<div class="sub" id="help2d">Drag to pan, scroll to zoom, drag a neuron to move it, click it for details. Size grows with importance and use; edge thickness is the current (effective) weight; dashed slate links are too weak to spread activation (tentative).</div>
+		<div class="sub" id="help3d" hidden>Drag to orbit, right-drag or shift-drag to pan, scroll to zoom, drag a neuron to move it, click it for details, double-click to focus. Size grows with importance and use; edge thickness is the current (effective) weight; dots run along typed synapses in their direction; dashed slate links are too weak to spread activation (tentative). <i>Simulate recall</i> in a neuron's details replays spreading activation from it.</div>
 	</aside>
 	<main id="stage">
 		<button id="toggle">☰ Filters</button>
 		<canvas id="c"></canvas>
+		<canvas id="gl" hidden></canvas>
+		<canvas id="gl-labels" hidden></canvas>
 		<div id="tip"></div>
 		<div id="empty"></div>
 		<section id="details"></section>
@@ -186,7 +217,10 @@ for (const e of DATA.edges) {
 	// Tentative: an associative link too weak to spread activation
 	// (below firing_threshold / hop_decay), e.g. an unconfirmed context link.
 	const tentative = e.kind === "associative" && DATA.propagation_weight !== undefined && w < DATA.propagation_weight;
-	const ed = { s, t, kind: e.kind, w, tentative, raw: e };
+	// Strength in 0..1 above the propagation weight: associative links fade
+	// from faint to strong with it.
+	const pw = tentative || DATA.propagation_weight === undefined ? 0 : DATA.propagation_weight;
+	const ed = { s, t, kind: e.kind, w, tentative, strength: Math.max(0, Math.min(1, (w - pw) / (1 - pw || 1))), raw: e };
 	edges.push(ed);
 	s.adj.push(ed);
 	t.adj.push(ed);
@@ -206,7 +240,7 @@ for (const n of nodes) {
 
 const state = {
 	types: new Set(TYPES), kinds: new Set(KINDS), dormant: true, isolated: true, minW: 0,
-	labels: "auto", query: "", matches: new Set(), selected: null, hover: null,
+	labels: "auto", query: "", matches: new Set(), selected: null, hover: null, mode: "2d",
 	view: { x: 0, y: 0, k: 1 },
 };
 
@@ -228,8 +262,11 @@ function applyFilters() {
 	const typed = new Set();
 	for (const e of visEdges) if (e.kind !== "associative") typed.add(pairKey(e));
 	for (const e of visEdges) e.drawn = e.kind !== "associative" || !typed.has(pairKey(e));
-	layoutAll();
-	fit();
+	if (state.mode === "3d") view3d.filtered();
+	else {
+		layoutAll();
+		fit();
+	}
 }
 const pairKey = (e) => (e.s.i < e.t.i ? e.s.i + ":" + e.t.i : e.t.i + ":" + e.s.i);
 
@@ -519,16 +556,17 @@ let W = 0, H = 0, DPR = 1, colors = {};
 function readColors() {
 	const cs = getComputedStyle(document.documentElement);
 	const v = (k) => cs.getPropertyValue(k).trim();
-	colors = { edge: v("--edge"), label: v("--label"), halo: v("--halo"), accent: v("--accent"), bg: v("--bg"), muted: v("--muted") };
+	colors = { edge: v("--edge"), label: v("--label"), halo: v("--halo"), accent: v("--accent"), bg: v("--bg"), muted: v("--muted"), tentative: v("--tentative"), strong: v("--edge-strong") };
 	for (const t of TYPES) colors["t-" + t] = v("--t-" + t);
 	for (const k of KINDS) colors["k-" + k] = v("--k-" + k);
 }
 function resize() {
-	const r = canvas.getBoundingClientRect();
+	const r = $("stage").getBoundingClientRect();
 	DPR = window.devicePixelRatio || 1;
 	W = r.width; H = r.height;
 	canvas.width = Math.round(W * DPR);
 	canvas.height = Math.round(H * DPR);
+	if (view3d.supported) view3d.resize();
 	kick();
 }
 
@@ -556,10 +594,12 @@ function draw() {
 		if (!e.drawn) continue;
 		const on = focus ? focus.has(e.s) && focus.has(e.t) && (e.s === (state.selected || state.hover) || e.t === (state.selected || state.hover)) : !searching;
 		ctx.globalAlpha = on ? 1 : 0.15;
-		ctx.strokeStyle = e.kind === "associative" ? colors.edge : colors["k-" + e.kind];
+		ctx.strokeStyle = e.kind === "associative" ? colors.strong : colors["k-" + e.kind];
+		if (e.kind === "associative" && !e.tentative) ctx.globalAlpha *= 0.3 + 0.7 * e.strength;
 		if (on && focus && e.kind === "associative") ctx.strokeStyle = colors.muted;
-		ctx.lineWidth = (e.tentative ? 0.5 : 0.6 + 3.4 * e.w) / Math.sqrt(k);
-		ctx.setLineDash(e.kind === "contradicts" ? [6 / k, 4 / k] : e.tentative ? [2 / k, 3 / k] : []);
+		if (e.tentative) ctx.strokeStyle = colors.tentative;
+		ctx.lineWidth = (e.tentative ? 0.9 : 0.6 + 4.4 * e.w) / Math.sqrt(k);
+		ctx.setLineDash(e.kind === "contradicts" ? [6 / k, 4 / k] : e.tentative ? [4 / k, 3 / k] : []);
 		ctx.beginPath();
 		ctx.moveTo(e.s.x, e.s.y);
 		ctx.lineTo(e.t.x, e.t.y);
@@ -686,6 +726,7 @@ let raf = 0;
 function kick() { if (!raf) raf = requestAnimationFrame(frame); }
 function frame() {
 	raf = 0;
+	if (state.mode === "3d") { view3d.frame(performance.now()); return; }
 	if (alpha > ALPHA_MIN) {
 		const steps = visNodes.length > 1500 ? 1 : 2;
 		for (let i = 0; i < steps; i++) tick();
@@ -720,6 +761,7 @@ function zoomAt(sx, sy, factor) {
 // The default cap of 1 keeps world units equal to screen pixels when the graph
 // fits, so the room the layout reserved for (screen-sized) labels is exact.
 function fit(ns = visNodes, maxK = 1) {
+	if (state.mode === "3d") return view3d.fit(ns);
 	if (!ns.length) return;
 	const { k, b } = fitZoom(ns, maxK);
 	state.view = { k, x: -((b.l + b.r) / 2) * k, y: -((b.t + b.b) / 2) * k };
@@ -865,6 +907,8 @@ function select(n) {
 	if (n.content) box.append(el("h2", { textContent: "Content" }), el("div", { className: "text", textContent: n.content }));
 	if (n.rationale) box.append(el("h2", { textContent: "Rationale" }), el("div", { className: "text", textContent: n.rationale }));
 
+	if (state.mode === "3d") view3d.details(box, n);
+
 	const links = [...n.adj].sort((a, b) => b.w - a.w);
 	box.append(el("h2", { textContent: `Synapses (${links.length})` }));
 	if (!links.length) box.append(el("div", { className: "sub", textContent: "No connections." }));
@@ -885,6 +929,7 @@ function select(n) {
 	box.append(ul);
 }
 function centerOn(n) {
+	if (state.mode === "3d") return view3d.center(n);
 	state.view.x = -n.x * state.view.k;
 	state.view.y = -n.y * state.view.k;
 	kick();
@@ -907,6 +952,13 @@ function buildControls() {
 	for (const t of TYPES) if (tc[t]) legendRow(types, t, t, "dot", colors["t-" + t], tc[t], state.types);
 	for (const k of KINDS) if (kc[k]) legendRow(kinds, k, k.replace("_", " "), "bar", colors["k-" + k], kc[k], state.kinds);
 	if (!edges.length) kinds.append(el("div", { className: "sub", textContent: "No synapses yet." }));
+	const tentative = edges.filter((e) => e.tentative).length;
+	if (tentative) {
+		const sw = el("span", { className: "dash" });
+		sw.style.borderColor = colors.tentative;
+		kinds.append(el("div", { className: "legend", title: "Associative links below firing_threshold / hop_decay carry no activation on their own" },
+			sw, "tentative (too weak)", el("span", { className: "n", textContent: tentative })));
+	}
 	const dormant = nodes.filter((n) => n.dormant).length;
 	let s = `${nodes.length} neurons · ${edges.length} synapses`;
 	if (dormant) s += ` · ${dormant} dormant`;
@@ -923,13 +975,20 @@ $("minw").oninput = (e) => {
 	$("minwv").textContent = state.minW.toFixed(2);
 	applyFilters();
 };
-for (const r of document.querySelectorAll('input[name="labels"]')) r.onchange = (e) => { state.labels = e.target.value; layoutAll(); fit(); };
+for (const r of document.querySelectorAll('input[name="labels"]')) r.onchange = (e) => {
+	state.labels = e.target.value;
+	if (state.mode === "3d") kick();
+	else { layoutAll(); fit(); }
+};
 $("fit").onclick = () => fit();
 $("relayout").onclick = () => {
+	if (state.mode === "3d") return view3d.relayout();
 	seed++;
 	layoutAll();
 	fit();
 };
+$("mode2d").onclick = () => setMode("2d");
+$("mode3d").onclick = () => setMode("3d");
 $("toggle").onclick = () => $("side").classList.toggle("open");
 
 const search = $("search");
@@ -956,14 +1015,55 @@ document.addEventListener("keydown", (e) => {
 	if (e.key === "/") { e.preventDefault(); search.focus(); }
 	if (e.key === "Escape") select(null);
 	if (e.key === "f") fit();
+	if (e.key === "2") setMode("2d");
+	if (e.key === "3") setMode("3d");
+	if ((e.key === "r" || e.key === "R") && state.mode === "3d") view3d.toggleRotate();
 });
+
+// Switches between the 2D and 3D views; the choice is remembered.
+const MODE_KEY = "plasticity-viz-view";
+function setMode(m, init) {
+	if (m === "3d" && !view3d.supported) m = "2d";
+	if (!init && m === state.mode) return;
+	state.mode = m;
+	if (!init) try { localStorage.setItem(MODE_KEY, m); } catch {}
+	const is3 = m === "3d";
+	$("c").hidden = is3;
+	$("gl").hidden = $("gl-labels").hidden = !is3;
+	$("opts3d").hidden = $("help3d").hidden = !is3;
+	$("help2d").hidden = is3;
+	$("mode2d").setAttribute("aria-pressed", String(!is3));
+	$("mode3d").setAttribute("aria-pressed", String(is3));
+	if (init) return;
+	state.hover = null;
+	hideTip();
+	resize();
+	if (is3) view3d.filtered();
+	else { layoutAll(); fit(); }
+	if (state.selected) select(state.selected);
+}
+// Initial view: the URL (#3d or #2d), then the exporter's choice (viz --3d),
+// then the viewer's last choice.
+function initialMode() {
+	const h = location.hash.slice(1);
+	if (h === "2d" || h === "3d") return h;
+	if (DATA.view === "2d" || DATA.view === "3d") return DATA.view;
+	try { return localStorage.getItem(MODE_KEY) === "3d" ? "3d" : "2d"; } catch { return "2d"; }
+}
+
+/*VIEW3D*/
 
 // ------------------------------------------------------------------ start
 readColors();
 const mq = window.matchMedia("(prefers-color-scheme: dark)");
-mq.addEventListener?.("change", () => { readColors(); buildControls(); if (state.selected) select(state.selected); kick(); });
+mq.addEventListener?.("change", () => { readColors(); if (view3d.supported) view3d.theme(); buildControls(); if (state.selected) select(state.selected); kick(); });
 window.addEventListener("resize", resize);
 buildControls();
+if (!view3d.supported) {
+	$("mode3d").disabled = true;
+	$("mode3d").title = "3D needs WebGL, which this browser does not provide";
+}
+setMode(initialMode(), true);
 resize();
 applyFilters();
 </script>

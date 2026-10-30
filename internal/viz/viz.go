@@ -1,7 +1,7 @@
 // Package viz renders the knowledge graph as a self-contained, interactive
 // HTML page (force-directed layout, filters, search, neuron details). The page
 // has no external dependencies, so it works offline and the graph never
-// leaves the machine.
+// leaves the machine. A second, WebGL view (viz3d.js) shows the graph in 3D.
 package viz
 
 import (
@@ -12,10 +12,16 @@ import (
 )
 
 //go:embed viz.html
-var page string
+var template string
 
-// placeholder is replaced by the graph data in the page template.
+//go:embed viz3d.js
+var view3D string
+
+// placeholder is replaced by the graph data in the page.
 const placeholder = "/*GRAPH_DATA*/null"
+
+// page is the template with the 3D view's script inlined.
+var page = strings.Replace(template, "/*VIEW3D*/", view3D, 1)
 
 // Write renders the page with data (any JSON-marshalable value holding
 // "nodes" and "edges") embedded in it.
