@@ -27,9 +27,10 @@ For development: `claude --plugin-dir /path/to/plasticity`.
 - **First session:** a background hook builds the engine and downloads a
   local embedding model (~90 MB). Until it is ready, search is keyword-only.
 - **Every prompt:** relevant memories are recalled and injected into the
-  context (up to 6 entries, ~5 ms). Task notifications of finished
-  background commands and agents are skipped, except for failed tasks,
-  which are recalled on their error output.
+  context (up to 6 entries, ~5 ms). A memory already injected in the
+  session is not injected again until the conversation is compacted. Task notifications of finished background commands and
+  agents are skipped, except for failed tasks, which are recalled on their
+  error output.
 - **While working:** Claude recalls more by itself when the need appears,
   for example before a design decision, in unfamiliar code, or when stuck on
   an error.

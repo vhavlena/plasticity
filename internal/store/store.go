@@ -1105,6 +1105,43 @@ func (t *Tx) SessionNodesSince(session string, minPrompt int, roles ...string) (
 	return ids, rows.Err()
 }
 
+// ShownNodes returns the neurons injected into a session since its last
+// compaction (see AddShown, ClearShown).
+func (t *Tx) ShownNodes(session string) ([]string, error) {
+	rows, err := t.tx.Query(`SELECT node_id FROM session_shown WHERE session = ? ORDER BY ts, node_id`, session)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// AddShown records neurons injected into a session.
+func (t *Tx) AddShown(session string, ids []string, at time.Time) error {
+	for _, id := range ids {
+		if _, err := t.tx.Exec(`INSERT INTO session_shown (session, node_id, ts) VALUES (?, ?, ?)
+			ON CONFLICT DO UPDATE SET ts = excluded.ts`, session, id, ts(at)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ClearShown forgets what was injected into a session (its context was
+// compacted, so earlier injections are no longer in the conversation).
+func (t *Tx) ClearShown(session string) error {
+	_, err := t.tx.Exec(`DELETE FROM session_shown WHERE session = ?`, session)
+	return err
+}
+
 // ---------------------------------------------------------------- events
 
 // Event is one entry of the event log.

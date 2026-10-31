@@ -498,7 +498,7 @@ func TestMigrationDropsRetiredPruneThreshold(t *testing.T) {
 			return err
 		}
 		// Back to the version before the prune migration, undoing the later ones.
-		for _, drop := range []string{`ALTER TABLE session_nodes DROP COLUMN prompt_no`, `ALTER TABLE nodes DROP COLUMN superseded_by`, `DROP TABLE node_projects`, `ALTER TABLE node_access DROP COLUMN weight`} {
+		for _, drop := range []string{`DROP TABLE session_shown`, `ALTER TABLE session_nodes DROP COLUMN prompt_no`, `ALTER TABLE nodes DROP COLUMN superseded_by`, `DROP TABLE node_projects`, `ALTER TABLE node_access DROP COLUMN weight`} {
 			if _, err := tx.tx.Exec(drop); err != nil {
 				return err
 			}
@@ -549,7 +549,7 @@ func TestNodeProjectsBackfillAndUpkeep(t *testing.T) {
 		}
 		// Back to the version before the migration, as an old database
 		// (undoing the later ones too).
-		for _, undo := range []string{`DROP TABLE node_projects`, `ALTER TABLE node_access DROP COLUMN weight`} {
+		for _, undo := range []string{`DROP TABLE session_shown`, `DROP TABLE node_projects`, `ALTER TABLE node_access DROP COLUMN weight`} {
 			if _, err := tx.tx.Exec(undo); err != nil {
 				return err
 			}

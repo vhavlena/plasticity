@@ -359,3 +359,85 @@ func TestContextWindowBoundary(t *testing.T) {
 		t.Fatalf("window boundary: hooks %g (want > 0), sqlite %g (want 0)", f.weight("probe", "hooks"), f.weight("probe", "sqlite"))
 	}
 }
+
+// Neurons already in the conversation are left out after the limit (their
+// slots are not refilled) and nothing is recorded for them.
+func TestRecallLeavesOutShown(t *testing.T) {
+	f := newFixture(t)
+	q := "sqlite storage process lock"
+	all, err := f.e.Recall(RecallRequest{Query: q, Limit: 6, NoRecord: true})
+	if err != nil || len(all.Hits) < 2 {
+		t.Fatalf("baseline recall: %v %+v", err, all)
+	}
+	top := all.Hits[0].Node.ID
+	one, err := f.e.Recall(RecallRequest{Query: q, Limit: 1, Shown: []string{top}})
+	if err != nil || len(one.Hits) != 0 || one.Repeated != 1 {
+		t.Fatalf("shown top hit must not be replaced by a weaker one: %v %+v", err, one)
+	}
+	res, err := f.e.Recall(RecallRequest{Query: q, Limit: 6, Shown: []string{top}})
+	if err != nil || res.Repeated != 1 || len(res.Hits) != len(all.Hits)-1 {
+		t.Fatalf("recall with shown: %v %+v", err, res)
+	}
+	for _, h := range res.Hits {
+		if h.Node.ID == top {
+			t.Fatal("shown neuron recalled again")
+		}
+	}
+	got, err := f.e.GetNode(top)
+	if err != nil || got.Fires != 0 {
+		t.Fatalf("shown neuron was recorded as fired: %v %+v", err, got)
+	}
+	other, _ := f.e.GetNode(res.Hits[0].Node.ID)
+	if res.Confidence >= f.e.P.LearnMinConfidence && other.Fires != 1 {
+		t.Fatalf("injected neuron not recorded: %+v", other)
+	}
+}
+
+// What was injected into a session is forgotten when the session is compacted.
+func TestShownNodesClearedOnCompaction(t *testing.T) {
+	f := newFixture(t)
+	if err := f.e.StartSession("S", "/repo", "startup"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.e.NoteShown("S", []string{f.ids["sqlite"], f.ids["hebb"]}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.e.ShownNodes("S"); err != nil || len(got) != 2 {
+		t.Fatalf("shown: %v %v", err, got)
+	}
+	if err := f.e.StartSession("S", "/repo", "resume"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := f.e.ShownNodes("S"); len(got) != 2 {
+		t.Fatalf("a resumed session keeps its context: %v", got)
+	}
+	if err := f.e.StartSession("S", "/repo", SourceCompact); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := f.e.ShownNodes("S"); len(got) != 0 {
+		t.Fatalf("compaction must clear what was shown: %v", got)
+	}
+}
+
+// A neuron whose text says it replaces another, named by ID, without
+// --supersedes gets a warning naming the unmarked neuron.
+func TestAddWarnsAboutProseSupersession(t *testing.T) {
+	f := newFixture(t)
+	old := f.ids["sqlite"]
+	res, err := f.e.AddNodeChecked(&model.Node{Type: model.TypeDecision, Title: "CORRECTION: storage is Postgres",
+		Content: "Supersedes node " + old + "; the SQLite choice was reverted."}, AddOptions{})
+	if err != nil || res.Node == nil || len(res.Unmarked) != 1 || res.Unmarked[0].ID != old ||
+		!strings.Contains(res.Warning, "update "+old+" --superseded-by "+res.Node.ID) {
+		t.Fatalf("prose supersession not flagged: %v %+v", err, res)
+	}
+	res, err = f.e.AddNodeChecked(&model.Node{Type: model.TypeDecision, Title: "Storage is Postgres for real",
+		Content: "replaces " + f.ids["badger"]}, AddOptions{Supersedes: []string{f.ids["badger"]}})
+	if err != nil || len(res.Unmarked) != 0 || res.Warning != "" {
+		t.Fatalf("marked supersession flagged: %v %+v", err, res)
+	}
+	res, err = f.e.AddNodeChecked(&model.Node{Type: model.TypeFact, Title: "Hooks and storage",
+		Content: "see " + f.ids["hooks"] + " for how hooks start"}, AddOptions{})
+	if err != nil || len(res.Unmarked) != 0 {
+		t.Fatalf("a plain reference is not a supersession: %v %+v", err, res)
+	}
+}

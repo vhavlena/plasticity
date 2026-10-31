@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -84,7 +85,7 @@ func (e *Engine) LogRecall(session, source, query string, r *RecallResult, laten
 		"source": source, "query": truncate(query, 500), "hits": hits, "confidence": r.Confidence,
 		"lexical": r.LexicalConfidence, "semantic": r.SemanticConfidence, "seeds": r.Seeds,
 		"latency_ms": float64(latency) / float64(time.Millisecond), "injected_chars": injectedChars,
-		"recall_id": r.RecallID, "trace_skipped": r.TraceSkipped, "suppressed": r.Suppressed,
+		"recall_id": r.RecallID, "trace_skipped": r.TraceSkipped, "suppressed": r.Suppressed, "repeated": r.Repeated,
 	})
 }
 
@@ -197,6 +198,11 @@ func (e *Engine) StartSession(id, project, source string, transcript ...string) 
 		if err := tx.TouchSession(id, project, timestamp()); err != nil {
 			return err
 		}
+		if source == SourceCompact { // the injected memories were compacted away
+			if err := tx.ClearShown(id); err != nil {
+				return err
+			}
+		}
 		if len(transcript) > 0 {
 			return tx.SetTranscript(id, transcript[0])
 		}
@@ -206,6 +212,30 @@ func (e *Engine) StartSession(id, project, source string, transcript ...string) 
 	}
 	e.Log(id, EventSessionStart, map[string]string{"project": project, "source": source})
 	return nil
+}
+
+// SourceCompact is the SessionStart source after Claude Code compacted the
+// conversation.
+const SourceCompact = "compact"
+
+// ShownNodes returns the neurons injected into a session since its last
+// compaction.
+func (e *Engine) ShownNodes(session string) ([]string, error) {
+	var ids []string
+	err := e.st.Read(func(tx *store.Tx) error {
+		var err error
+		ids, err = tx.ShownNodes(session)
+		return err
+	})
+	return ids, err
+}
+
+// NoteShown records neurons injected into a session.
+func (e *Engine) NoteShown(session string, ids []string) error {
+	if session == "" || len(ids) == 0 {
+		return nil
+	}
+	return e.st.Write(func(tx *store.Tx) error { return tx.AddShown(session, ids, timestamp()) })
 }
 
 // NotePrompt records a user prompt of a session.
@@ -304,6 +334,57 @@ type AddResult struct {
 	Hint    string          `json:"hint,omitempty"`
 	// Warning flags a questionable add, e.g. one without an importance.
 	Warning string `json:"warning,omitempty"`
+	// Unmarked lists existing neurons that the new neuron's text names by
+	// ID while saying it replaces or corrects something, but that were not
+	// passed as Supersedes: the replacement is only in prose, so the old
+	// neuron would still be injected.
+	Unmarked []SimilarNeuron `json:"possibly_superseded,omitempty"`
+}
+
+// AddWarning appends w to the result's warning.
+func (r *AddResult) AddWarning(w string) {
+	if r.Warning != "" {
+		r.Warning += "; "
+	}
+	r.Warning += w
+}
+
+var (
+	neuronIDRE = regexp.MustCompile(`\b[0-9A-HJKMNP-TV-Z]{26}\b`) // a ULID
+	// replacementRE matches wording that says a neuron replaces another.
+	replacementRE = regexp.MustCompile(`(?i)\b(supersed\w*|replac\w*|correct(ion|ed|s)?|revert\w*|obsolete|outdated|no longer)\b`)
+)
+
+// unmarkedSupersessions returns the current neurons that n's text names by
+// ID, if the text speaks of replacing or correcting, except those in marked.
+func (e *Engine) unmarkedSupersessions(n *model.Node, marked []string) ([]SimilarNeuron, error) {
+	text := n.Title + "\n" + n.Content + "\n" + n.Rationale
+	if !replacementRE.MatchString(text) {
+		return nil, nil
+	}
+	var ids []string
+	for _, id := range neuronIDRE.FindAllString(text, -1) {
+		if id != n.ID && !slices.Contains(marked, id) && !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var out []SimilarNeuron
+	err := e.st.Read(func(tx *store.Tx) error {
+		nodes, err := tx.GetNodes(ids)
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			if m := nodes[id]; m != nil && m.SupersededBy == "" {
+				out = append(out, SimilarNeuron{ID: m.ID, Title: m.Title})
+			}
+		}
+		return nil
+	})
+	return out, err
 }
 
 // AddNodeChecked adds a neuron after a duplicate check (same normalized
@@ -351,6 +432,15 @@ func (e *Engine) AddNodeChecked(n *model.Node, opt AddOptions) (*AddResult, erro
 	}
 	if len(res.Similar) > 0 {
 		res.Hint = fmt.Sprintf("If a similar neuron is now wrong or replaced, mark it: update ID --superseded-by %s. If it is still partly true, update its content instead.", n.ID)
+	}
+	if res.Unmarked, err = e.unmarkedSupersessions(n, opt.Supersedes); err != nil {
+		return nil, err
+	}
+	for _, u := range res.Unmarked {
+		w := fmt.Sprintf("the text names %s (%s) as replaced, but it is not marked and will still be injected: if it is outdated, run update %s --superseded-by %s",
+			u.ID, truncate(u.Title, 60), u.ID, n.ID)
+		res.AddWarning(w)
+		e.Warnings = append(e.Warnings, w)
 	}
 	if opt.Session != "" {
 		n, err := e.linkToSession(opt.Session, n.ID, RoleCreated, true)

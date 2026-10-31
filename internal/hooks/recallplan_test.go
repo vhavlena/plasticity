@@ -43,7 +43,7 @@ If this event is something the user would act on now, send a PushNotification.
 
 func TestPlanRecall(t *testing.T) {
 	c := DefaultConfig()
-	if p := c.PlanRecall("why did we pick sqlite storage?", nil); p.Skip || p.Kind != KindPrompt || p.Query != "why did we pick sqlite storage?" || p.Limit != 0 || p.MinConfidence != 0 {
+	if p := c.PlanRecall("why did we pick sqlite storage?", nil); p.Skip || p.Kind != KindPrompt || p.Query != "why did we pick sqlite storage?" || p.Limit != 0 || p.MinConfidence != c.PromptMinConfidence {
 		t.Fatalf("plain prompt: %+v", p)
 	}
 	for _, s := range []string{"/compact", "ok go"} {
@@ -128,6 +128,7 @@ func TestPromptHookNotifications(t *testing.T) {
 	e := newEngine(t)
 	cfg := DefaultConfig()
 	cfg.Embeddings = "off"
+	cfg.SkipShown = false // the same failure is recalled twice below
 	add(t, e, "Benchmark server experiment pitfalls",
 		"Without sourcing the shell profile in the batch job, run_bench.py fails with cannot locate analyzer tool(s): checks")
 	add(t, e, "Graph visualization: self-contained HTML", "plasticity viz renders the build output page")

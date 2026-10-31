@@ -187,4 +187,15 @@ INSERT INTO node_projects (node_id, project, created, uses)
 	WHERE s.project <> '' AND sn.role IN ('created', 'used')
 	GROUP BY sn.node_id, s.project;
 `,
+	// session_shown: the neurons the prompt hook injected into a session
+	// since its last compaction, so a neuron still in the conversation is
+	// not injected again.
+	`
+CREATE TABLE session_shown (
+	session TEXT NOT NULL,
+	node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+	ts      INTEGER NOT NULL,
+	PRIMARY KEY (session, node_id)
+) WITHOUT ROWID;
+`,
 }
