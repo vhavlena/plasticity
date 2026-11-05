@@ -452,11 +452,12 @@ func TestSessionsAndEvents(t *testing.T) {
 		if err := tx.LogEvent(t0, "T", "add", nil); err != nil {
 			return err
 		}
-		return tx.SetNudged("S")
+		return tx.SetNudged("S", 2, 7, t0.Add(2*time.Second))
 	})
 	_ = s.Read(func(tx *Tx) error {
 		ss, err := tx.GetSession("S")
-		if err != nil || ss.Project != "/repo" || ss.Prompts != 2 || ss.FirstPrompt != "first question" || !ss.Nudged {
+		if err != nil || ss.Project != "/repo" || ss.Prompts != 2 || ss.FirstPrompt != "first question" || !ss.Nudged ||
+			ss.Nudges != 1 || ss.NudgePrompt != 2 || ss.NudgeCalls != 7 || !ss.NudgedAt.Equal(t0.Add(2*time.Second)) {
 			t.Fatalf("session: %v %+v", err, ss)
 		}
 		if missing, _ := tx.GetSession("nope"); missing != nil {
@@ -498,7 +499,7 @@ func TestMigrationDropsRetiredPruneThreshold(t *testing.T) {
 			return err
 		}
 		// Back to the version before the prune migration, undoing the later ones.
-		for _, drop := range []string{`DROP TABLE session_shown`, `ALTER TABLE session_nodes DROP COLUMN prompt_no`, `ALTER TABLE nodes DROP COLUMN superseded_by`, `DROP TABLE node_projects`, `ALTER TABLE node_access DROP COLUMN weight`} {
+		for _, drop := range []string{`ALTER TABLE sessions DROP COLUMN nudge_prompt`, `ALTER TABLE sessions DROP COLUMN nudge_calls`, `ALTER TABLE sessions DROP COLUMN nudged_at`, `DROP TABLE session_shown`, `ALTER TABLE session_nodes DROP COLUMN prompt_no`, `ALTER TABLE nodes DROP COLUMN superseded_by`, `DROP TABLE node_projects`, `ALTER TABLE node_access DROP COLUMN weight`} {
 			if _, err := tx.tx.Exec(drop); err != nil {
 				return err
 			}
@@ -549,7 +550,7 @@ func TestNodeProjectsBackfillAndUpkeep(t *testing.T) {
 		}
 		// Back to the version before the migration, as an old database
 		// (undoing the later ones too).
-		for _, undo := range []string{`DROP TABLE session_shown`, `DROP TABLE node_projects`, `ALTER TABLE node_access DROP COLUMN weight`} {
+		for _, undo := range []string{`ALTER TABLE sessions DROP COLUMN nudge_prompt`, `ALTER TABLE sessions DROP COLUMN nudge_calls`, `ALTER TABLE sessions DROP COLUMN nudged_at`, `DROP TABLE session_shown`, `DROP TABLE node_projects`, `ALTER TABLE node_access DROP COLUMN weight`} {
 			if _, err := tx.tx.Exec(undo); err != nil {
 				return err
 			}

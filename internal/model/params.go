@@ -195,6 +195,15 @@ type Params struct {
 	// NudgeMinToolCalls: the Stop hook asks Claude to store or report
 	// memories only after at least this many tool calls in the session.
 	NudgeMinToolCalls int `json:"nudge_min_tool_calls"`
+	// NudgeEveryPrompts and NudgeMax: after the first nudge, the Stop hook
+	// reminds Claude again, at most NudgeMax times per session in all and at
+	// least NudgeEveryPrompts prompts apart, when memories were injected
+	// since the last nudge or memory report and none of them was reported as
+	// used. A single nudge at the start of a long session left most
+	// injected memories unjudged (real use: one used report in 96 prompts).
+	// NudgeMax = 1 restores the single nudge.
+	NudgeEveryPrompts int `json:"nudge_every_prompts"`
+	NudgeMax          int `json:"nudge_max"`
 	// ConsolidateEverySessions runs consolidation after every n ended sessions.
 	ConsolidateEverySessions int `json:"consolidate_every_sessions"`
 
@@ -273,6 +282,8 @@ func DefaultParams() Params {
 		WindowLTPMinCos:          0.4,
 		DedupeCos:                0.9,
 		NudgeMinToolCalls:        5,
+		NudgeEveryPrompts:        10,
+		NudgeMax:                 4,
 		ConsolidateEverySessions: 10,
 
 		PPRRestart: 0.15,
@@ -327,7 +338,7 @@ func (p Params) Validate() error {
 	}
 	if p.ReinforceTopK < 2 || p.SeedLimit < 1 || p.MaxNodes < 1 || p.MaxHops < 1 ||
 		p.EdgesPerNode < 1 || p.ResultLimit < 1 || p.MaxAccessRecords < 1 || p.TraceRetention < 1 || p.EmbedMaxWords < 1 ||
-		p.ContextLinks < 0 || p.ContextWindow < 0 || p.SharedMinProjects < 1 || p.MinEvidenceNodes < 0 || p.NudgeMinToolCalls < 0 || p.ConsolidateEverySessions < 1 {
+		p.ContextLinks < 0 || p.ContextWindow < 0 || p.SharedMinProjects < 1 || p.MinEvidenceNodes < 0 || p.NudgeMinToolCalls < 0 || p.NudgeEveryPrompts < 1 || p.NudgeMax < 0 || p.ConsolidateEverySessions < 1 {
 		return fmt.Errorf("integer limits must be positive (reinforce_top_k ≥ 2)")
 	}
 	return nil

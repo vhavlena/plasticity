@@ -344,18 +344,36 @@ func formatMemories(r *engine.RecallResult, session, cli string, budget int) (st
 	return b.String(), ids
 }
 
+// maxUnreportedListed bounds the memories a repeated nudge lists.
+const maxUnreportedListed = 8
+
 // nudgeReason is the Stop-hook message asking Claude to consolidate the
-// session into memory.
-func nudgeReason(session, cli string) string {
-	return fmt.Sprintf(`Before finishing, update long-term memory (plasticity) if this session produced anything worth keeping:
-- durable knowledge (decisions with rationale, root causes, working procedures, user preferences):
+// session into memory. A nudge with unreported memories lists them, so
+// Claude can judge them without searching the conversation.
+func nudgeReason(session, cli string, n *engine.Nudge) string {
+	var b strings.Builder
+	b.WriteString("Before finishing, update long-term memory (plasticity) if this session produced anything worth keeping:\n")
+	fmt.Fprintf(&b, `- durable knowledge (decisions with rationale, root causes, working procedures, user preferences):
   %s add -t <type> --title "..." -c "..." -r "why" --importance 0..1 --session %s
 - memories that helped: %s used --session %s ID [ID...]
-If nothing is worth keeping, simply finish; you will not be asked again in this session.`, cli, session, cli, session)
+`, cli, session, cli, session)
+	if n != nil && len(n.Unreported) > 0 {
+		b.WriteString("Memories injected since the last report, not yet reported as used (report only the ones that actually helped):\n")
+		for i, node := range n.Unreported {
+			if i == maxUnreportedListed {
+				fmt.Fprintf(&b, "  … and %d more\n", len(n.Unreported)-i)
+				break
+			}
+			fmt.Fprintf(&b, "  [%s] %s\n", node.ID, truncate(node.Title, 80))
+		}
+	}
+	b.WriteString("If nothing is worth keeping or reporting, simply finish.")
+	return b.String()
 }
 
-// Stop asks Claude, at most once per session and only after substantive
-// work, to store or report memories.
+// Stop asks Claude, after substantive work, to store or report memories:
+// once early in the session and again, at a bounded pace, when injected
+// memories go unreported (see engine.ShouldNudge).
 func Stop(e *engine.Engine, in Input, cfg Config) (*Output, error) {
 	if !cfg.Reflect || in.StopHookActive {
 		return nil, nil
@@ -364,11 +382,11 @@ func Stop(e *engine.Engine, in Input, cfg Config) (*Output, error) {
 	if err != nil {
 		return nil, err
 	}
-	ok, err := e.ShouldNudge(in.SessionID, calls)
-	if err != nil || !ok {
+	n, err := e.ShouldNudge(in.SessionID, calls)
+	if err != nil || n == nil {
 		return nil, err
 	}
-	return &Output{Decision: "block", Reason: nudgeReason(in.SessionID, cfg.CLI())}, nil
+	return &Output{Decision: "block", Reason: nudgeReason(in.SessionID, cfg.CLI(), n)}, nil
 }
 
 // SessionEnd closes the session and, if enabled, creates its episode neuron

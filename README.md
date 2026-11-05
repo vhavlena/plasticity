@@ -38,8 +38,10 @@ For development: `claude --plugin-dir /path/to/plasticity`.
   rationale, root causes, procedures, preferences) with `plasticity add`,
   and reports the memories that helped with `plasticity used`. Those
   reports teach the graph which knowledge belongs together.
-- **End of a task:** once per session, after substantive work, Claude is
-  asked to store anything worth keeping.
+- **End of a task:** after substantive work, Claude is asked to store
+  anything worth keeping. Later in the session it is reminded again (at most
+  every 10 prompts, 4 times in all) when injected memories went unreported;
+  the reminder lists them, so the ones that helped can be reported as used.
 - **End of a session:** the session is closed. Its history (first prompt,
   the memories it used and created) is kept outside the graph and listed by
   `plasticity sessions`. With the `episodes` option, an `episode` neuron also

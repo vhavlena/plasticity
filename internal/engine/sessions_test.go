@@ -73,22 +73,69 @@ func TestSessionContextLinksAndUsed(t *testing.T) {
 func TestNudgePolicy(t *testing.T) {
 	f := newFixture(t)
 	f.e.StartSession("S", "", "startup")
-	if ok, _ := f.e.ShouldNudge("S", 3); ok {
+	if n, _ := f.e.ShouldNudge("S", 3); n != nil {
 		t.Fatal("nudged below the tool-call threshold")
 	}
-	if ok, _ := f.e.ShouldNudge("S", 6); !ok {
-		t.Fatal("expected a nudge after substantive work")
+	if n, _ := f.e.ShouldNudge("S", 6); n == nil || n.Repeat || len(n.Unreported) != 0 {
+		t.Fatalf("expected a first nudge after substantive work: %+v", n)
 	}
-	if ok, _ := f.e.ShouldNudge("S", 50); ok {
-		t.Fatal("nudged twice in one session")
+	if n, _ := f.e.ShouldNudge("S", 50); n != nil {
+		t.Fatal("nudged again with nothing injected since")
 	}
 	f.e.StartSession("T", "", "startup")
 	f.e.Used("T", []string{f.ids["hebb"]})
-	if ok, _ := f.e.ShouldNudge("T", 50); ok {
-		t.Fatal("a session that reported memories must not be nudged")
+	if n, _ := f.e.ShouldNudge("T", 50); n != nil {
+		t.Fatal("a session that reported memories and was shown none since must not be nudged")
 	}
-	if ok, _ := f.e.ShouldNudge("unknown", 50); ok {
+	if n, _ := f.e.ShouldNudge("unknown", 50); n != nil {
 		t.Fatal("unknown session nudged")
+	}
+}
+
+func TestRepeatedNudge(t *testing.T) {
+	f := newFixture(t)
+	f.e.P.NudgeEveryPrompts, f.e.P.NudgeMax = 3, 3
+	f.e.StartSession("S", "", "startup")
+	prompt := func(k int) {
+		for range k {
+			f.e.NotePrompt("S", "", "a prompt")
+		}
+	}
+	prompt(1)
+	if n, _ := f.e.ShouldNudge("S", 6); n == nil {
+		t.Fatal("expected the first nudge")
+	}
+	f.e.NoteShown("S", []string{f.ids["hebb"], f.ids["sqlite"]})
+	prompt(1)
+	if n, _ := f.e.ShouldNudge("S", 20); n != nil {
+		t.Fatal("repeated nudge before nudge_every_prompts prompts")
+	}
+	prompt(2)
+	if n, _ := f.e.ShouldNudge("S", 8); n != nil {
+		t.Fatal("repeated nudge before nudge_min_tool_calls new tool calls")
+	}
+	n, _ := f.e.ShouldNudge("S", 20)
+	if n == nil || !n.Repeat || len(n.Unreported) != 2 || n.Unreported[0].ID == n.Unreported[1].ID {
+		t.Fatalf("expected a repeated nudge listing both unreported memories: %+v", n)
+	}
+	// Memories injected before a report count as judged; the ones after it
+	// that were not reported are listed.
+	f.e.NoteShown("S", []string{f.ids["spread"]})
+	f.e.Used("S", []string{f.ids["hebb"]})
+	prompt(5)
+	if n, _ := f.e.ShouldNudge("S", 40); n != nil {
+		t.Fatal("nudged although everything injected before the report was judged")
+	}
+	f.e.NoteShown("S", []string{f.ids["hebb"], f.ids["pasta"]})
+	n, _ = f.e.ShouldNudge("S", 40)
+	if n == nil || len(n.Unreported) != 1 || n.Unreported[0].ID != f.ids["pasta"] {
+		t.Fatalf("expected a nudge listing only the unreported new memory: %+v", n)
+	}
+	// nudge_max bounds the nudges per session.
+	f.e.NoteShown("S", []string{f.ids["sqlite"]})
+	prompt(5)
+	if n, _ := f.e.ShouldNudge("S", 80); n != nil {
+		t.Fatal("nudged beyond nudge_max")
 	}
 }
 

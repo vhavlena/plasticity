@@ -198,4 +198,12 @@ CREATE TABLE session_shown (
 	PRIMARY KEY (session, node_id)
 ) WITHOUT ROWID;
 `,
+	// sessions.nudged becomes the number of nudges (older binaries read it
+	// as a flag); the last nudge's prompt number, tool-call count and time
+	// pace the repeated nudges.
+	`
+ALTER TABLE sessions ADD COLUMN nudge_prompt INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sessions ADD COLUMN nudge_calls INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sessions ADD COLUMN nudged_at INTEGER NOT NULL DEFAULT 0;
+`,
 }

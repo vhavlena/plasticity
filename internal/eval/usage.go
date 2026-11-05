@@ -115,7 +115,7 @@ type Usage struct {
 
 	// Reflection nudge (Stop hook).
 	Nudges        int     `json:"nudges"`
-	NudgeResponse float64 `json:"nudge_response"` // share of nudges followed by add/used in the session
+	NudgeResponse float64 `json:"nudge_response"` // share of nudges followed by add/used before the next nudge
 
 	// Learning.
 	LinksCreated int `json:"links_created"`
@@ -227,7 +227,7 @@ func AnalyzeUsage(events []store.Event) *Usage {
 	createdUsed := map[string]bool{}             // neuron -> used in another session
 	recallHits := map[string][]map[string]bool{} // session -> hit sets of its non-empty recalls
 	nudgedAt := map[string]int64{}               // session -> nudge event ID
-	responded := map[string]bool{}
+	responded := map[int64]bool{}                // nudge event ID -> followed by add/used before the next nudge
 	var latencies []time.Duration
 	var hits, chars int
 	var conf float64
@@ -310,8 +310,8 @@ func AnalyzeUsage(events []store.Event) *Usage {
 				u.Depressed += r.Depressed
 				d.LinksCreated += r.Created
 			}
-			if _, ok := nudgedAt[ev.Session]; ok {
-				responded[ev.Session] = true
+			if id, ok := nudgedAt[ev.Session]; ok {
+				responded[id] = true
 			}
 		case engine.EventAdd:
 			p, ok := decode[addPayload](ev)
@@ -338,8 +338,8 @@ func AnalyzeUsage(events []store.Event) *Usage {
 			if p.ID != "" {
 				createdIn[p.ID] = ev.Session
 			}
-			if _, ok := nudgedAt[ev.Session]; ok {
-				responded[ev.Session] = true
+			if id, ok := nudgedAt[ev.Session]; ok {
+				responded[id] = true
 			}
 		case engine.EventNudge:
 			u.Nudges++

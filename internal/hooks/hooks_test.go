@@ -149,11 +149,29 @@ func TestStopNudge(t *testing.T) {
 	if err != nil || out == nil || out.Decision != "block" || !strings.Contains(out.Reason, "plasticity --db '/h/graph.db' add") || !strings.Contains(out.Reason, "--session S") {
 		t.Fatalf("expected nudge: %v %+v", err, out)
 	}
-	if !strings.Contains(nudgeReason("S", Config{DB: "/h/graph.db"}.CLI()), "plasticity --db '/h/graph.db' --no-log add") {
+	if !strings.Contains(nudgeReason("S", Config{DB: "/h/graph.db"}.CLI(), &engine.Nudge{}), "plasticity --db '/h/graph.db' --no-log add") {
 		t.Fatal("log=false must pass --no-log to the suggested commands")
 	}
 	if out, _ := Stop(e, Input{SessionID: "S", TranscriptPath: many}, cfg); out != nil {
-		t.Fatal("nudged twice")
+		t.Fatal("nudged twice with nothing injected since")
+	}
+	// Memories injected and left unreported for nudge_every_prompts prompts
+	// bring a reminder that lists them.
+	n, err := e.AddNode(&model.Node{Type: model.TypeFact, Title: "Injected but never reported"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.NoteShown("S", []string{n.ID})
+	for range e.P.NudgeEveryPrompts {
+		e.NotePrompt("S", "", "next")
+	}
+	for i := 0; i < 6; i++ {
+		tools = append(tools, [2]string{"Bash", ""})
+	}
+	more := transcript(t, tools...)
+	out, err = Stop(e, Input{SessionID: "S", TranscriptPath: more}, cfg)
+	if err != nil || out == nil || !strings.Contains(out.Reason, "["+n.ID+"] Injected but never reported") {
+		t.Fatalf("expected a repeated nudge listing the unreported memory: %v %+v", err, out)
 	}
 	e.StartSession("T", "", "startup")
 	if out, _ := Stop(e, Input{SessionID: "T", TranscriptPath: many}, Config{Reflect: false}); out != nil {

@@ -622,28 +622,87 @@ func (e *Engine) linkToSession(session, node, role string, window bool) (int, er
 	return len(links), err
 }
 
+// Nudge is the Stop hook's decision to ask Claude to store or report
+// memories.
+type Nudge struct {
+	// Repeat: the session was nudged before.
+	Repeat bool
+	// Unreported: the neurons injected since the last nudge or memory report
+	// (and since the last compaction) that the session has not reported as
+	// used, in injection order (one prompt's memories in ID order).
+	Unreported []*model.Node
+}
+
 // ShouldNudge decides whether the Stop hook should ask Claude to store or
-// report memories: at most once per session, only after toolCalls ≥
-// NudgeMinToolCalls, and only if the session neither stored nor reported
-// anything. A positive decision is recorded.
-func (e *Engine) ShouldNudge(session string, toolCalls int) (bool, error) {
-	nudge := false
+// report memories, after toolCalls tool calls in the session (nil: no).
+//
+//   - The first nudge comes after NudgeMinToolCalls tool calls if the session
+//     has neither stored nor reported anything.
+//   - Later nudges (up to NudgeMax nudges in all) come when, since the last
+//     nudge or memory report (add or used), whichever is later, memories
+//     were injected that the session has not reported as used, at least
+//     NudgeEveryPrompts prompts and NudgeMinToolCalls tool calls after the
+//     last nudge. A session that reported memories before its first nudge
+//     is reminded the same way.
+//
+// A positive decision is recorded.
+func (e *Engine) ShouldNudge(session string, toolCalls int) (*Nudge, error) {
+	var nudge *Nudge
 	err := e.st.Write(func(tx *store.Tx) error {
 		s, err := tx.GetSession(session)
-		if err != nil || s == nil || s.Nudged || toolCalls < e.P.NudgeMinToolCalls {
+		if err != nil || s == nil || s.Nudges >= e.P.NudgeMax || toolCalls-s.NudgeCalls < e.P.NudgeMinToolCalls {
 			return err
 		}
-		ids, err := tx.SessionNodes(session, RoleUsed, RoleCreated)
-		if err != nil || len(ids) > 0 {
+		active, err := tx.LastSessionNode(session, RoleUsed, RoleCreated)
+		if err != nil {
 			return err
 		}
-		nudge = true
-		return tx.SetNudged(session)
+		if s.Nudges == 0 && active.IsZero() {
+			nudge = &Nudge{}
+		} else {
+			if s.Prompts-s.NudgePrompt < e.P.NudgeEveryPrompts { // NudgePrompt is 0 before the first nudge
+				return nil
+			}
+			since := active
+			if s.NudgedAt.After(since) {
+				since = s.NudgedAt
+			}
+			shown, err := tx.ShownSince(session, since)
+			if err != nil || len(shown) == 0 {
+				return err
+			}
+			used, err := tx.SessionNodes(session, RoleUsed)
+			if err != nil {
+				return err
+			}
+			shown = slices.DeleteFunc(shown, func(id string) bool { return slices.Contains(used, id) })
+			if len(shown) == 0 {
+				return nil
+			}
+			nodes, err := tx.GetNodes(shown)
+			if err != nil {
+				return err
+			}
+			nudge = &Nudge{Repeat: s.Nudges > 0}
+			for _, id := range shown {
+				if n := nodes[id]; n != nil {
+					nudge.Unreported = append(nudge.Unreported, n)
+				}
+			}
+			if len(nudge.Unreported) == 0 {
+				nudge = nil
+				return nil
+			}
+		}
+		return tx.SetNudged(session, s.Prompts, toolCalls, timestamp())
 	})
-	if nudge {
-		e.Log(session, EventNudge, map[string]int{"tool_calls": toolCalls})
+	if err != nil {
+		return nil, err
 	}
-	return nudge, err
+	if nudge != nil {
+		e.Log(session, EventNudge, map[string]int{"tool_calls": toolCalls, "unreported": len(nudge.Unreported)})
+	}
+	return nudge, nil
 }
 
 // AbandonedSessions returns up to limit sessions that never ended and were
