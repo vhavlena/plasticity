@@ -72,6 +72,15 @@ type Config struct {
 	NotificationLimit         int
 	NotificationMinConfidence float64
 	NotificationMaxChars      int
+	// PromptMinConfidence suppresses the recall for a prompt whose query
+	// confidence stays below it (0, the default: never). Off by default: on
+	// the real-use scenarios a threshold of 0.6 dropped short task prompts
+	// ("ssh login and port for vojta", "analyze the issue #467") whose
+	// labeled memories were relevant; query confidence barely predicts use.
+	PromptMinConfidence float64
+	// SkipShown leaves out memories already injected into the session since
+	// its last compaction: they are still in the conversation.
+	SkipShown bool
 	// DB is the graph the hook opened. Commands Claude runs through Bash see
 	// neither the plugin options nor the session's cwd, so the commands the
 	// hooks suggest name this graph (and the log option) explicitly (see CLI).
@@ -100,7 +109,8 @@ func shellQuote(s string) string {
 // DefaultConfig returns the plugin options' defaults.
 func DefaultConfig() Config {
 	return Config{Scope: "global", RecallLimit: 6, Reflect: true, Log: true, Embeddings: "auto", ContextBudget: 3000,
-		SessionIdle: 48 * time.Hour, Notifications: NotifyFailed, NotificationLimit: 0, NotificationMinConfidence: 0.6, NotificationMaxChars: 600}
+		SessionIdle: 48 * time.Hour, Notifications: NotifyFailed, NotificationLimit: 0, NotificationMinConfidence: 0.6, NotificationMaxChars: 600,
+		SkipShown: true}
 }
 
 // ConfigFromEnv reads CLAUDE_PLUGIN_OPTION_<KEY> (as declared or upper-case),
@@ -160,6 +170,14 @@ func ConfigFromEnv() Config {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			c.NotificationMaxChars = n
 		}
+	}
+	if v, ok := get("prompt_min_confidence"); ok {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 && f <= 1 {
+			c.PromptMinConfidence = f
+		}
+	}
+	if v, ok := get("skip_shown"); ok {
+		c.SkipShown = truthy(v)
 	}
 	return c
 }
@@ -252,21 +270,31 @@ func Prompt(e *engine.Engine, in Input, project string, cfg Config) (*Output, er
 	if plan.Limit > 0 {
 		limit = min(limit, plan.Limit)
 	}
+	var shown []string
+	if cfg.SkipShown {
+		var err error
+		if shown, err = e.ShownNodes(in.SessionID); err != nil {
+			return nil, err
+		}
+	}
 	start := time.Now()
 	// Episodes quote raw prompts: they match many queries lexically and would
 	// crowd knowledge out of the few injected slots. They stay reachable
 	// through explicit recall and search. Superseded neurons are never
 	// injected; their successors are, in their place.
 	r, err := e.Recall(engine.RecallRequest{Query: plan.Query, Session: in.SessionID, Project: project, Limit: limit,
-		MinConfidence: plan.MinConfidence, ExcludeTypes: []model.NodeType{model.TypeEpisode}, ExcludeSuperseded: true, Auto: true})
+		MinConfidence: plan.MinConfidence, ExcludeTypes: []model.NodeType{model.TypeEpisode}, ExcludeSuperseded: true, Auto: true, Shown: shown})
 	if err != nil {
 		return nil, err
 	}
 	latency := time.Since(start)
-	text := FormatMemories(r, in.SessionID, cfg.CLI(), cfg.ContextBudget)
+	text, ids := formatMemories(r, in.SessionID, cfg.CLI(), cfg.ContextBudget)
 	e.LogRecall(in.SessionID, source, plan.Query, r, latency, len(text))
 	if text == "" {
 		return nil, nil
+	}
+	if err := e.NoteShown(in.SessionID, ids); err != nil {
+		return nil, err
 	}
 	return contextOutput("UserPromptSubmit", text), nil
 }
@@ -274,9 +302,17 @@ func Prompt(e *engine.Engine, in Input, project string, cfg Config) (*Output, er
 // FormatMemories renders recalled memories as compact context within budget
 // characters ("" if there are none); cli is the command prefix (Config.CLI).
 func FormatMemories(r *engine.RecallResult, session, cli string, budget int) string {
+	text, _ := formatMemories(r, session, cli, budget)
+	return text
+}
+
+// formatMemories is FormatMemories that also returns the IDs of the
+// memories that fit in the budget.
+func formatMemories(r *engine.RecallResult, session, cli string, budget int) (string, []string) {
 	if len(r.Hits) == 0 {
-		return ""
+		return "", nil
 	}
+	var ids []string
 	var b strings.Builder
 	fmt.Fprintf(&b, "<plasticity-memories session=%q>\nPossibly relevant memories (verify before relying on them):\n", session)
 	footer := fmt.Sprintf("If any helped, report them: %s used --session %s ID...\n</plasticity-memories>", cli, session)
@@ -299,23 +335,45 @@ func FormatMemories(r *engine.RecallResult, session, cli string, budget int) str
 			break
 		}
 		b.WriteString(line)
+		ids = append(ids, n.ID)
+	}
+	if len(ids) == 0 {
+		return "", nil
 	}
 	b.WriteString(footer)
+	return b.String(), ids
+}
+
+// maxUnreportedListed bounds the memories a repeated nudge lists.
+const maxUnreportedListed = 8
+
+// nudgeReason is the Stop-hook message asking Claude to consolidate the
+// session into memory. A nudge with unreported memories lists them, so
+// Claude can judge them without searching the conversation.
+func nudgeReason(session, cli string, n *engine.Nudge) string {
+	var b strings.Builder
+	b.WriteString("Before finishing, update long-term memory (plasticity) if this session produced anything worth keeping:\n")
+	fmt.Fprintf(&b, `- durable knowledge (decisions with rationale, root causes, working procedures, user preferences):
+  %s add -t <type> --title "..." -c "..." -r "why" --importance 0..1 --session %s
+- memories that helped: %s used --session %s ID [ID...]
+`, cli, session, cli, session)
+	if n != nil && len(n.Unreported) > 0 {
+		b.WriteString("Memories injected since the last report, not yet reported as used (report only the ones that actually helped):\n")
+		for i, node := range n.Unreported {
+			if i == maxUnreportedListed {
+				fmt.Fprintf(&b, "  … and %d more\n", len(n.Unreported)-i)
+				break
+			}
+			fmt.Fprintf(&b, "  [%s] %s\n", node.ID, truncate(node.Title, 80))
+		}
+	}
+	b.WriteString("If nothing is worth keeping or reporting, simply finish.")
 	return b.String()
 }
 
-// nudgeReason is the Stop-hook message asking Claude to consolidate the
-// session into memory.
-func nudgeReason(session, cli string) string {
-	return fmt.Sprintf(`Before finishing, update long-term memory (plasticity) if this session produced anything worth keeping:
-- durable knowledge (decisions with rationale, root causes, working procedures, user preferences):
-  %s add -t <type> --title "..." -c "..." -r "why" --importance 0..1 --session %s
-- memories that helped: %s used --session %s ID [ID...]
-If nothing is worth keeping, simply finish; you will not be asked again in this session.`, cli, session, cli, session)
-}
-
-// Stop asks Claude, at most once per session and only after substantive
-// work, to store or report memories.
+// Stop asks Claude, after substantive work, to store or report memories:
+// once early in the session and again, at a bounded pace, when injected
+// memories go unreported (see engine.ShouldNudge).
 func Stop(e *engine.Engine, in Input, cfg Config) (*Output, error) {
 	if !cfg.Reflect || in.StopHookActive {
 		return nil, nil
@@ -324,11 +382,11 @@ func Stop(e *engine.Engine, in Input, cfg Config) (*Output, error) {
 	if err != nil {
 		return nil, err
 	}
-	ok, err := e.ShouldNudge(in.SessionID, calls)
-	if err != nil || !ok {
+	n, err := e.ShouldNudge(in.SessionID, calls)
+	if err != nil || n == nil {
 		return nil, err
 	}
-	return &Output{Decision: "block", Reason: nudgeReason(in.SessionID, cfg.CLI())}, nil
+	return &Output{Decision: "block", Reason: nudgeReason(in.SessionID, cfg.CLI(), n)}, nil
 }
 
 // SessionEnd closes the session and, if enabled, creates its episode neuron

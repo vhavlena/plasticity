@@ -149,11 +149,29 @@ func TestStopNudge(t *testing.T) {
 	if err != nil || out == nil || out.Decision != "block" || !strings.Contains(out.Reason, "plasticity --db '/h/graph.db' add") || !strings.Contains(out.Reason, "--session S") {
 		t.Fatalf("expected nudge: %v %+v", err, out)
 	}
-	if !strings.Contains(nudgeReason("S", Config{DB: "/h/graph.db"}.CLI()), "plasticity --db '/h/graph.db' --no-log add") {
+	if !strings.Contains(nudgeReason("S", Config{DB: "/h/graph.db"}.CLI(), &engine.Nudge{}), "plasticity --db '/h/graph.db' --no-log add") {
 		t.Fatal("log=false must pass --no-log to the suggested commands")
 	}
 	if out, _ := Stop(e, Input{SessionID: "S", TranscriptPath: many}, cfg); out != nil {
-		t.Fatal("nudged twice")
+		t.Fatal("nudged twice with nothing injected since")
+	}
+	// Memories injected and left unreported for nudge_every_prompts prompts
+	// bring a reminder that lists them.
+	n, err := e.AddNode(&model.Node{Type: model.TypeFact, Title: "Injected but never reported"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.NoteShown("S", []string{n.ID})
+	for range e.P.NudgeEveryPrompts {
+		e.NotePrompt("S", "", "next")
+	}
+	for i := 0; i < 6; i++ {
+		tools = append(tools, [2]string{"Bash", ""})
+	}
+	more := transcript(t, tools...)
+	out, err = Stop(e, Input{SessionID: "S", TranscriptPath: more}, cfg)
+	if err != nil || out == nil || !strings.Contains(out.Reason, "["+n.ID+"] Injected but never reported") {
+		t.Fatalf("expected a repeated nudge listing the unreported memory: %v %+v", err, out)
 	}
 	e.StartSession("T", "", "startup")
 	if out, _ := Stop(e, Input{SessionID: "T", TranscriptPath: many}, Config{Reflect: false}); out != nil {
@@ -450,5 +468,69 @@ func TestPromptNeverInjectsSuperseded(t *testing.T) {
 	ctx := out.Specific.AdditionalContext
 	if strings.Contains(ctx, old) || !strings.Contains(ctx, cur) || !strings.Contains(ctx, "supersedes:") {
 		t.Fatalf("superseded neuron injected or successor unmarked:\n%s", ctx)
+	}
+}
+
+// A memory injected into a session is not injected again until the
+// conversation is compacted.
+func TestPromptSkipsShownUntilCompaction(t *testing.T) {
+	e := newEngine(t)
+	cfg := DefaultConfig()
+	cfg.Embeddings = "off"
+	sqlite := add(t, e, "Use SQLite WAL for storage", "many processes read while one writes")
+	if _, err := SessionStart(e, Input{SessionID: "S", Source: "startup"}, "/repo", cfg); err != nil {
+		t.Fatal(err)
+	}
+	prompt := func() *Output {
+		t.Helper()
+		out, err := Prompt(e, Input{SessionID: "S", Prompt: "why did we pick sqlite wal storage?"}, "/repo", cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if out := prompt(); out == nil || !strings.Contains(out.Specific.AdditionalContext, sqlite) {
+		t.Fatalf("first prompt must inject the memory: %+v", out)
+	}
+	if out := prompt(); out != nil {
+		t.Fatalf("memory injected twice: %+v", out)
+	}
+	recalls, _ := e.Events(store.EventFilter{Session: "S", Kind: engine.EventRecall})
+	if len(recalls) != 2 || !strings.Contains(string(recalls[1].Payload), `"repeated":1`) {
+		t.Fatalf("recall events: %+v", recalls)
+	}
+	if _, err := SessionStart(e, Input{SessionID: "S", Source: "compact"}, "/repo", cfg); err != nil {
+		t.Fatal(err)
+	}
+	if out := prompt(); out == nil || !strings.Contains(out.Specific.AdditionalContext, sqlite) {
+		t.Fatalf("after compaction the memory must be injected again: %+v", out)
+	}
+	cfg.SkipShown = false
+	if out := prompt(); out == nil {
+		t.Fatal("with skip_shown off every prompt injects")
+	}
+}
+
+// A prompt whose query confidence stays below prompt_min_confidence injects
+// nothing and records the suppression.
+func TestPromptMinConfidence(t *testing.T) {
+	e := newEngine(t)
+	cfg := DefaultConfig()
+	cfg.Embeddings = "off"
+	cfg.PromptMinConfidence = 0.6
+	add(t, e, "Use SQLite WAL for storage", "many processes read while one writes")
+	add(t, e, "Cooking pasta", "boil water")
+	q := "sqlite quarterly invoice reconciliation spreadsheet export"
+	out, err := Prompt(e, Input{SessionID: "S", Prompt: q}, "/repo", cfg)
+	if err != nil || out != nil {
+		t.Fatalf("weak match injected: %v %+v", err, out)
+	}
+	recalls, _ := e.Events(store.EventFilter{Session: "S", Kind: engine.EventRecall})
+	if len(recalls) != 1 || !strings.Contains(string(recalls[0].Payload), "below 0.60") {
+		t.Fatalf("suppression not logged: %+v", recalls)
+	}
+	cfg.PromptMinConfidence = 0
+	if out, err := Prompt(e, Input{SessionID: "S", Prompt: q}, "/repo", cfg); err != nil || out == nil {
+		t.Fatalf("without a threshold the weak match is injected: %v %+v", err, out)
 	}
 }

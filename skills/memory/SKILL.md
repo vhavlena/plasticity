@@ -72,6 +72,11 @@ plasticity add -t decision --title "..." -c "..." --supersedes OLD_ID --session 
 plasticity update OLD_ID --superseded-by NEW_ID     # after the fact; --clear-superseded undoes it
 ```
 
+Always use `--supersedes` (or `update --superseded-by`): saying "supersedes
+node X" or "CORRECTION" only in the text does not mark anything, and the old
+neuron keeps being injected. `add` warns (`possibly_superseded`) when the text
+names a neuron as replaced without marking it.
+
 The `add` result lists `similar` existing neurons: check whether one is now
 outdated. Supersede only what is **wholly** replaced. If an old neuron is still
 partly true, update it instead. Example: a neuron diagnosing why disequations

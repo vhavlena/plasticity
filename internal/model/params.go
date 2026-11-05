@@ -108,7 +108,11 @@ type Params struct {
 	// query: its strength is multiplied by clamp((cos − low)/(high − low)).
 	// A keyword coincidence (a generic word such as "build" or "going" shared
 	// with an unrelated neuron) has a cosine near zero and stops seeding.
-	// lexical_cos_high = 0 turns the check off.
+	// lexical_cos_high = 0 turns the check off. Tighter bounds (0.1/0.35)
+	// cut about 16% of the real-use hits, but they lost labelled relevant
+	// procedures in the real-use scenarios (context-links recall 0.80 →
+	// 0.66): a how-to neuron ("use gh api for issues", "ssh to the server")
+	// shares keywords with a task prompt but has a low cosine to it.
 	LexicalCosLow  float64 `json:"lexical_cos_low"`
 	LexicalCosHigh float64 `json:"lexical_cos_high"`
 	// EmbedMaxWords truncates texts before embedding.
@@ -122,6 +126,9 @@ type Params struct {
 	// "global"), so foreign knowledge needs stronger evidence and spreads
 	// less. ForeignProjectFactorExplicit applies to recalls Claude issues
 	// itself (an explicit query is a stronger signal). 1 turns it off.
+	// The default 0.3 (was 0.5): in the real-use log, 130 prompt-injected
+	// hits were foreign and none was used; 0.3 drops two thirds of the
+	// foreign seeds, and no real-use scenario lost recall or MRR.
 	ForeignProjectFactor         float64 `json:"foreign_project_factor"`
 	ForeignProjectFactorExplicit float64 `json:"foreign_project_factor_explicit"`
 	// SharedMinProjects: a neuron used in at least this many projects is
@@ -188,6 +195,15 @@ type Params struct {
 	// NudgeMinToolCalls: the Stop hook asks Claude to store or report
 	// memories only after at least this many tool calls in the session.
 	NudgeMinToolCalls int `json:"nudge_min_tool_calls"`
+	// NudgeEveryPrompts and NudgeMax: after the first nudge, the Stop hook
+	// reminds Claude again, at most NudgeMax times per session in all and at
+	// least NudgeEveryPrompts prompts apart, when memories were injected
+	// since the last nudge or memory report and none of them was reported as
+	// used. A single nudge at the start of a long session left most
+	// injected memories unjudged (real use: one used report in 96 prompts).
+	// NudgeMax = 1 restores the single nudge.
+	NudgeEveryPrompts int `json:"nudge_every_prompts"`
+	NudgeMax          int `json:"nudge_max"`
 	// ConsolidateEverySessions runs consolidation after every n ended sessions.
 	ConsolidateEverySessions int `json:"consolidate_every_sessions"`
 
@@ -238,7 +254,7 @@ func DefaultParams() Params {
 		EmbedMaxWords:      200,
 		SupersededFactor:   0.5,
 
-		ForeignProjectFactor:         0.5,
+		ForeignProjectFactor:         0.3,
 		ForeignProjectFactorExplicit: 0.8,
 		SharedMinProjects:            2,
 		HopDecay:                     0.8,
@@ -266,6 +282,8 @@ func DefaultParams() Params {
 		WindowLTPMinCos:          0.4,
 		DedupeCos:                0.9,
 		NudgeMinToolCalls:        5,
+		NudgeEveryPrompts:        10,
+		NudgeMax:                 4,
 		ConsolidateEverySessions: 10,
 
 		PPRRestart: 0.15,
@@ -320,7 +338,7 @@ func (p Params) Validate() error {
 	}
 	if p.ReinforceTopK < 2 || p.SeedLimit < 1 || p.MaxNodes < 1 || p.MaxHops < 1 ||
 		p.EdgesPerNode < 1 || p.ResultLimit < 1 || p.MaxAccessRecords < 1 || p.TraceRetention < 1 || p.EmbedMaxWords < 1 ||
-		p.ContextLinks < 0 || p.ContextWindow < 0 || p.SharedMinProjects < 1 || p.MinEvidenceNodes < 0 || p.NudgeMinToolCalls < 0 || p.ConsolidateEverySessions < 1 {
+		p.ContextLinks < 0 || p.ContextWindow < 0 || p.SharedMinProjects < 1 || p.MinEvidenceNodes < 0 || p.NudgeMinToolCalls < 0 || p.NudgeEveryPrompts < 1 || p.NudgeMax < 0 || p.ConsolidateEverySessions < 1 {
 		return fmt.Errorf("integer limits must be positive (reinforce_top_k ≥ 2)")
 	}
 	return nil

@@ -213,7 +213,7 @@ result lists "similar" existing neurons; if one of them is outdated, mark it wit
 				// Importance stays 0 by default (stored data keeps its meaning),
 				// but a forgotten one is the most common way a neuron is mis-weighted.
 				if !importanceSet {
-					res.Warning = importanceWarning
+					res.AddWarning(importanceWarning)
 					e.Warnings = append(e.Warnings, importanceWarning)
 				}
 				for _, l := range specs {

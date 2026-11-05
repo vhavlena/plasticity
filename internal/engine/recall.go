@@ -102,6 +102,11 @@ type RecallRequest struct {
 	// the new one. Without it, superseded neurons stay visible with their
 	// score scaled by superseded_factor.
 	ExcludeSuperseded bool
+	// Shown are neurons already in the conversation (injected earlier in the
+	// session). They are dropped from the hits after the limit is applied,
+	// so their slots are not refilled with weaker hits, and nothing is
+	// recorded for them: being recalled again is no new evidence.
+	Shown []string
 }
 
 // RecallHit is one recalled neuron.
@@ -130,7 +135,9 @@ type RecallResult struct {
 	TraceSkipped string `json:"trace_skipped,omitempty"`
 	// Suppressed explains why a recall with seeds returned no hits.
 	Suppressed string `json:"suppressed,omitempty"`
-	Query      string `json:"query"`
+	// Repeated counts the hits left out because they were in Shown.
+	Repeated int    `json:"repeated,omitempty"`
+	Query    string `json:"query"`
 	// Confidence is max(LexicalConfidence, SemanticConfidence); it gates
 	// learning.
 	Confidence float64 `json:"confidence"`
@@ -298,6 +305,11 @@ func (e *Engine) Recall(req RecallRequest) (*RecallResult, error) {
 		})
 		if len(res.Hits) > req.Limit {
 			res.Hits = res.Hits[:req.Limit]
+		}
+		if len(req.Shown) > 0 {
+			n := len(res.Hits)
+			res.Hits = slices.DeleteFunc(res.Hits, func(h RecallHit) bool { return slices.Contains(req.Shown, h.Node.ID) })
+			res.Repeated = n - len(res.Hits)
 		}
 		return nil
 	})

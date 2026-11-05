@@ -27,9 +27,10 @@ For development: `claude --plugin-dir /path/to/plasticity`.
 - **First session:** a background hook builds the engine and downloads a
   local embedding model (~90 MB). Until it is ready, search is keyword-only.
 - **Every prompt:** relevant memories are recalled and injected into the
-  context (up to 6 entries, ~5 ms). Task notifications of finished
-  background commands and agents are skipped, except for failed tasks,
-  which are recalled on their error output.
+  context (up to 6 entries, ~5 ms). A memory already injected in the
+  session is not injected again until the conversation is compacted. Task notifications of finished background commands and
+  agents are skipped, except for failed tasks, which are recalled on their
+  error output.
 - **While working:** Claude recalls more by itself when the need appears,
   for example before a design decision, in unfamiliar code, or when stuck on
   an error.
@@ -37,8 +38,10 @@ For development: `claude --plugin-dir /path/to/plasticity`.
   rationale, root causes, procedures, preferences) with `plasticity add`,
   and reports the memories that helped with `plasticity used`. Those
   reports teach the graph which knowledge belongs together.
-- **End of a task:** once per session, after substantive work, Claude is
-  asked to store anything worth keeping.
+- **End of a task:** after substantive work, Claude is asked to store
+  anything worth keeping. Later in the session it is reminded again (at most
+  every 10 prompts, 4 times in all) when injected memories went unreported;
+  the reminder lists them, so the ones that helped can be reported as used.
 - **End of a session:** the session is closed. Its history (first prompt,
   the memories it used and created) is kept outside the graph and listed by
   `plasticity sessions`. With the `episodes` option, an `episode` neuron also

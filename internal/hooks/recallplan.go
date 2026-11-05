@@ -85,7 +85,8 @@ func tag(re *regexp.Regexp, s string) string {
 //     confidence threshold: a pitfall memory may explain the failure;
 //   - an unparsable notification is recalled like a failed one, so a format
 //     change of Claude Code loses no recall but cannot flood the context;
-//   - any other prompt is recalled as it is.
+//   - any other prompt is recalled as it is, if its query confidence
+//     reaches PromptMinConfidence.
 //
 // Config.Notifications can instead recall every notification like a prompt
 // (the behavior before notifications were told apart) or none.
@@ -94,7 +95,7 @@ func (c Config) PlanRecall(prompt string, tail func(path string) string) RecallP
 		if trivial(prompt) {
 			return RecallPlan{Kind: KindTrivial, Skip: true}
 		}
-		return RecallPlan{Kind: KindPrompt, Query: prompt}
+		return RecallPlan{Kind: KindPrompt, Query: prompt, MinConfidence: c.PromptMinConfidence}
 	}
 	switch c.Notifications {
 	case NotifyAll:

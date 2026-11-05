@@ -850,6 +850,10 @@ type Session struct {
 	FirstPrompt string    `json:"first_prompt"`
 	Prompts     int       `json:"prompts"`
 	Nudged      bool      `json:"nudged"`
+	Nudges      int       `json:"nudges,omitempty"`
+	NudgePrompt int       `json:"nudge_prompt,omitempty"` // prompt count at the last nudge
+	NudgeCalls  int       `json:"nudge_calls,omitempty"`  // tool calls at the last nudge
+	NudgedAt    time.Time `json:"nudged_at,omitzero"`
 	EpisodeID   string    `json:"episode_id,omitempty"`
 	StartedAt   time.Time `json:"started_at"`
 	LastSeen    time.Time `json:"last_seen"`
@@ -929,17 +933,21 @@ func (t *Tx) ListSessions(project string, limit int) ([]*Session, error) {
 // GetSession returns a session or nil if unknown.
 func (t *Tx) GetSession(id string) (*Session, error) {
 	var s Session
-	var nudged int
-	var started, seen, ended int64
-	err := t.tx.QueryRow(`SELECT id, project, transcript, first_prompt, prompts, nudged, episode_id, started_at, last_seen, ended_at
-		FROM sessions WHERE id = ?`, id).Scan(&s.ID, &s.Project, &s.Transcript, &s.FirstPrompt, &s.Prompts, &nudged, &s.EpisodeID, &started, &seen, &ended)
+	var started, seen, ended, nudgedAt int64
+	err := t.tx.QueryRow(`SELECT id, project, transcript, first_prompt, prompts, nudged, nudge_prompt, nudge_calls, nudged_at,
+		episode_id, started_at, last_seen, ended_at
+		FROM sessions WHERE id = ?`, id).Scan(&s.ID, &s.Project, &s.Transcript, &s.FirstPrompt, &s.Prompts,
+		&s.Nudges, &s.NudgePrompt, &s.NudgeCalls, &nudgedAt, &s.EpisodeID, &started, &seen, &ended)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	s.Nudged = nudged != 0
+	s.Nudged = s.Nudges != 0
+	if nudgedAt != 0 {
+		s.NudgedAt = fromTS(nudgedAt)
+	}
 	s.StartedAt, s.LastSeen = fromTS(started), fromTS(seen)
 	if ended != 0 {
 		s.EndedAt = fromTS(ended)
@@ -955,9 +963,11 @@ func (t *Tx) CountPrompt(id, prompt string) error {
 	return err
 }
 
-// SetNudged marks that the session received the reflection nudge.
-func (t *Tx) SetNudged(id string) error {
-	_, err := t.tx.Exec(`UPDATE sessions SET nudged = 1 WHERE id = ?`, id)
+// SetNudged records a reflection nudge of the session, given at prompt
+// count prompt after calls tool calls.
+func (t *Tx) SetNudged(id string, prompt, calls int, at time.Time) error {
+	_, err := t.tx.Exec(`UPDATE sessions SET nudged = nudged + 1, nudge_prompt = ?, nudge_calls = ?, nudged_at = ?
+		WHERE id = ?`, prompt, calls, ts(at), id)
 	return err
 }
 
@@ -1103,6 +1113,74 @@ func (t *Tx) SessionNodesSince(session string, minPrompt int, roles ...string) (
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// ShownNodes returns the neurons injected into a session since its last
+// compaction (see AddShown, ClearShown).
+func (t *Tx) ShownNodes(session string) ([]string, error) {
+	rows, err := t.tx.Query(`SELECT node_id FROM session_shown WHERE session = ? ORDER BY ts, node_id`, session)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// AddShown records neurons injected into a session.
+func (t *Tx) AddShown(session string, ids []string, at time.Time) error {
+	for _, id := range ids {
+		if _, err := t.tx.Exec(`INSERT INTO session_shown (session, node_id, ts) VALUES (?, ?, ?)
+			ON CONFLICT DO UPDATE SET ts = excluded.ts`, session, id, ts(at)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ShownSince returns the neurons injected into a session after the given
+// time (and since its last compaction), in order.
+func (t *Tx) ShownSince(session string, after time.Time) ([]string, error) {
+	rows, err := t.tx.Query(`SELECT node_id FROM session_shown WHERE session = ? AND ts > ? ORDER BY ts, node_id`, session, ts(after))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// LastSessionNode returns when a session last recorded a neuron in one of
+// the roles (zero time if never).
+func (t *Tx) LastSessionNode(session string, roles ...string) (time.Time, error) {
+	var last sql.NullInt64
+	err := t.tx.QueryRow(`SELECT max(ts) FROM session_nodes WHERE session = ? AND role IN (`+placeholders(len(roles))+`)`,
+		append([]any{session}, anys(roles)...)...).Scan(&last)
+	if err != nil || !last.Valid {
+		return time.Time{}, err
+	}
+	return fromTS(last.Int64), nil
+}
+
+// ClearShown forgets what was injected into a session (its context was
+// compacted, so earlier injections are no longer in the conversation).
+func (t *Tx) ClearShown(session string) error {
+	_, err := t.tx.Exec(`DELETE FROM session_shown WHERE session = ?`, session)
+	return err
 }
 
 // ---------------------------------------------------------------- events

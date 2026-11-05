@@ -73,22 +73,69 @@ func TestSessionContextLinksAndUsed(t *testing.T) {
 func TestNudgePolicy(t *testing.T) {
 	f := newFixture(t)
 	f.e.StartSession("S", "", "startup")
-	if ok, _ := f.e.ShouldNudge("S", 3); ok {
+	if n, _ := f.e.ShouldNudge("S", 3); n != nil {
 		t.Fatal("nudged below the tool-call threshold")
 	}
-	if ok, _ := f.e.ShouldNudge("S", 6); !ok {
-		t.Fatal("expected a nudge after substantive work")
+	if n, _ := f.e.ShouldNudge("S", 6); n == nil || n.Repeat || len(n.Unreported) != 0 {
+		t.Fatalf("expected a first nudge after substantive work: %+v", n)
 	}
-	if ok, _ := f.e.ShouldNudge("S", 50); ok {
-		t.Fatal("nudged twice in one session")
+	if n, _ := f.e.ShouldNudge("S", 50); n != nil {
+		t.Fatal("nudged again with nothing injected since")
 	}
 	f.e.StartSession("T", "", "startup")
 	f.e.Used("T", []string{f.ids["hebb"]})
-	if ok, _ := f.e.ShouldNudge("T", 50); ok {
-		t.Fatal("a session that reported memories must not be nudged")
+	if n, _ := f.e.ShouldNudge("T", 50); n != nil {
+		t.Fatal("a session that reported memories and was shown none since must not be nudged")
 	}
-	if ok, _ := f.e.ShouldNudge("unknown", 50); ok {
+	if n, _ := f.e.ShouldNudge("unknown", 50); n != nil {
 		t.Fatal("unknown session nudged")
+	}
+}
+
+func TestRepeatedNudge(t *testing.T) {
+	f := newFixture(t)
+	f.e.P.NudgeEveryPrompts, f.e.P.NudgeMax = 3, 3
+	f.e.StartSession("S", "", "startup")
+	prompt := func(k int) {
+		for range k {
+			f.e.NotePrompt("S", "", "a prompt")
+		}
+	}
+	prompt(1)
+	if n, _ := f.e.ShouldNudge("S", 6); n == nil {
+		t.Fatal("expected the first nudge")
+	}
+	f.e.NoteShown("S", []string{f.ids["hebb"], f.ids["sqlite"]})
+	prompt(1)
+	if n, _ := f.e.ShouldNudge("S", 20); n != nil {
+		t.Fatal("repeated nudge before nudge_every_prompts prompts")
+	}
+	prompt(2)
+	if n, _ := f.e.ShouldNudge("S", 8); n != nil {
+		t.Fatal("repeated nudge before nudge_min_tool_calls new tool calls")
+	}
+	n, _ := f.e.ShouldNudge("S", 20)
+	if n == nil || !n.Repeat || len(n.Unreported) != 2 || n.Unreported[0].ID == n.Unreported[1].ID {
+		t.Fatalf("expected a repeated nudge listing both unreported memories: %+v", n)
+	}
+	// Memories injected before a report count as judged; the ones after it
+	// that were not reported are listed.
+	f.e.NoteShown("S", []string{f.ids["spread"]})
+	f.e.Used("S", []string{f.ids["hebb"]})
+	prompt(5)
+	if n, _ := f.e.ShouldNudge("S", 40); n != nil {
+		t.Fatal("nudged although everything injected before the report was judged")
+	}
+	f.e.NoteShown("S", []string{f.ids["hebb"], f.ids["pasta"]})
+	n, _ = f.e.ShouldNudge("S", 40)
+	if n == nil || len(n.Unreported) != 1 || n.Unreported[0].ID != f.ids["pasta"] {
+		t.Fatalf("expected a nudge listing only the unreported new memory: %+v", n)
+	}
+	// nudge_max bounds the nudges per session.
+	f.e.NoteShown("S", []string{f.ids["sqlite"]})
+	prompt(5)
+	if n, _ := f.e.ShouldNudge("S", 80); n != nil {
+		t.Fatal("nudged beyond nudge_max")
 	}
 }
 
@@ -357,5 +404,87 @@ func TestContextWindowBoundary(t *testing.T) {
 	f.ids["probe"] = res.Node.ID
 	if f.weight("probe", "hooks") == 0 || f.weight("probe", "sqlite") != 0 {
 		t.Fatalf("window boundary: hooks %g (want > 0), sqlite %g (want 0)", f.weight("probe", "hooks"), f.weight("probe", "sqlite"))
+	}
+}
+
+// Neurons already in the conversation are left out after the limit (their
+// slots are not refilled) and nothing is recorded for them.
+func TestRecallLeavesOutShown(t *testing.T) {
+	f := newFixture(t)
+	q := "sqlite storage process lock"
+	all, err := f.e.Recall(RecallRequest{Query: q, Limit: 6, NoRecord: true})
+	if err != nil || len(all.Hits) < 2 {
+		t.Fatalf("baseline recall: %v %+v", err, all)
+	}
+	top := all.Hits[0].Node.ID
+	one, err := f.e.Recall(RecallRequest{Query: q, Limit: 1, Shown: []string{top}})
+	if err != nil || len(one.Hits) != 0 || one.Repeated != 1 {
+		t.Fatalf("shown top hit must not be replaced by a weaker one: %v %+v", err, one)
+	}
+	res, err := f.e.Recall(RecallRequest{Query: q, Limit: 6, Shown: []string{top}})
+	if err != nil || res.Repeated != 1 || len(res.Hits) != len(all.Hits)-1 {
+		t.Fatalf("recall with shown: %v %+v", err, res)
+	}
+	for _, h := range res.Hits {
+		if h.Node.ID == top {
+			t.Fatal("shown neuron recalled again")
+		}
+	}
+	got, err := f.e.GetNode(top)
+	if err != nil || got.Fires != 0 {
+		t.Fatalf("shown neuron was recorded as fired: %v %+v", err, got)
+	}
+	other, _ := f.e.GetNode(res.Hits[0].Node.ID)
+	if res.Confidence >= f.e.P.LearnMinConfidence && other.Fires != 1 {
+		t.Fatalf("injected neuron not recorded: %+v", other)
+	}
+}
+
+// What was injected into a session is forgotten when the session is compacted.
+func TestShownNodesClearedOnCompaction(t *testing.T) {
+	f := newFixture(t)
+	if err := f.e.StartSession("S", "/repo", "startup"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.e.NoteShown("S", []string{f.ids["sqlite"], f.ids["hebb"]}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.e.ShownNodes("S"); err != nil || len(got) != 2 {
+		t.Fatalf("shown: %v %v", err, got)
+	}
+	if err := f.e.StartSession("S", "/repo", "resume"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := f.e.ShownNodes("S"); len(got) != 2 {
+		t.Fatalf("a resumed session keeps its context: %v", got)
+	}
+	if err := f.e.StartSession("S", "/repo", SourceCompact); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := f.e.ShownNodes("S"); len(got) != 0 {
+		t.Fatalf("compaction must clear what was shown: %v", got)
+	}
+}
+
+// A neuron whose text says it replaces another, named by ID, without
+// --supersedes gets a warning naming the unmarked neuron.
+func TestAddWarnsAboutProseSupersession(t *testing.T) {
+	f := newFixture(t)
+	old := f.ids["sqlite"]
+	res, err := f.e.AddNodeChecked(&model.Node{Type: model.TypeDecision, Title: "CORRECTION: storage is Postgres",
+		Content: "Supersedes node " + old + "; the SQLite choice was reverted."}, AddOptions{})
+	if err != nil || res.Node == nil || len(res.Unmarked) != 1 || res.Unmarked[0].ID != old ||
+		!strings.Contains(res.Warning, "update "+old+" --superseded-by "+res.Node.ID) {
+		t.Fatalf("prose supersession not flagged: %v %+v", err, res)
+	}
+	res, err = f.e.AddNodeChecked(&model.Node{Type: model.TypeDecision, Title: "Storage is Postgres for real",
+		Content: "replaces " + f.ids["badger"]}, AddOptions{Supersedes: []string{f.ids["badger"]}})
+	if err != nil || len(res.Unmarked) != 0 || res.Warning != "" {
+		t.Fatalf("marked supersession flagged: %v %+v", err, res)
+	}
+	res, err = f.e.AddNodeChecked(&model.Node{Type: model.TypeFact, Title: "Hooks and storage",
+		Content: "see " + f.ids["hooks"] + " for how hooks start"}, AddOptions{})
+	if err != nil || len(res.Unmarked) != 0 {
+		t.Fatalf("a plain reference is not a supersession: %v %+v", err, res)
 	}
 }
